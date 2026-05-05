@@ -1,0 +1,44 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build and package outputs
+build/
+dist/
+*.egg-info/
+
+# Local environment and logs
+.env
+.env.*
+!.env.example
+*.log
+
+# Local Codex/runtime artifacts
+.codex/
+artifacts/
+backups/
+*.sqlite-shm
+*.sqlite-wal
