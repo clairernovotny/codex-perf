@@ -234,7 +234,7 @@ def launch_codex(app_path: Path, port: int, workspace: Path | None) -> None:
     subprocess.run(
         [
             "open",
-            "-na",
+            "-a",
             str(app_path),
             "--args",
             "--remote-debugging-address=127.0.0.1",

@@ -67,6 +67,12 @@ class CdpLauncherTests(unittest.TestCase):
         ]:
             self.assertNotIn(forbidden, code)
 
+    def test_macos_launch_does_not_force_new_app_instance(self):
+        code = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('"open",', code)
+        self.assertIn('"-a",', code)
+        self.assertNotIn('"-na",', code)
+
     def test_root_launchers_do_not_run_offline_repair_before_launch(self):
         shell_code = SHELL_LAUNCHER.read_text(encoding="utf-8")
         cmd_code = CMD_LAUNCHER.read_text(encoding="utf-8")
