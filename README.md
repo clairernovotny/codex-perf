@@ -9,11 +9,22 @@ rendering stay on the native Codex thread page.
 
 ## The Performance Issue
 
-Codex Desktop keeps thread metadata in local storage and uses that metadata to
-build the sidebar and route into thread views. Large local profiles can develop
-thread titles that are full prompt previews instead of short labels. Those long
-titles make the sidebar heavier to render and make thread-list updates more
-expensive.
+Codex Desktop keeps thread metadata in local storage and sends that metadata
+into an Electron renderer to build the sidebar and route into thread views. Large
+local profiles can develop thread titles that are full prompt previews instead
+of short labels.
+
+Those long titles create UI lag in the Electron renderer:
+
+- The app process has to read and JSON-encode much larger thread-list rows.
+- Electron has to move that larger payload across the app-to-renderer boundary.
+- The renderer has to parse, allocate, diff, and reconcile large strings on the
+  JavaScript main thread.
+- Sidebar rows with huge text force more text handling, truncation, and layout
+  work during list updates.
+
+The visible symptom is a sidebar or thread switch that appears stuck. The UI
+thread is busy processing metadata that should have been a short label.
 
 Changing into an old or large thread also has a cold path: Codex starts native
 navigation first, then reads enough thread data to show the chat. When that read
@@ -46,6 +57,9 @@ characters.
 That is a `99.8%` payload reduction for the title-list response and moves JSON
 encoding from tens of milliseconds to sub-millisecond. The extreme case was one
 thread title carrying `941,848` characters where the UI needed a short label.
+In Electron terms, that removes about `18.9 MB` of avoidable string payload from
+the thread-list path before the renderer starts parsing, allocating, reconciling,
+and laying out sidebar rows.
 
 The runtime fixer uses the same 120-character ceiling. A later drift check found
 one new title at `137` characters; the same app-action repair path brought the
