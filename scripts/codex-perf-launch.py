@@ -377,6 +377,8 @@ def launch_macos_codex(app_path: Path, port: int) -> None:
             f"--remote-debugging-port={port}",
         ],
         check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
 
 
@@ -394,6 +396,8 @@ def launch_windows_codex(app_path: Path, port: int) -> None:
         ],
         cwd=str(executable.parent),
         close_fds=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
 
 

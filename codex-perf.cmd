@@ -5,9 +5,9 @@ set "ROOT_DIR=%~dp0"
 
 where py >nul 2>nul
 if %ERRORLEVEL%==0 (
-  py -3 "%ROOT_DIR%scripts\codex-perf-launch.py" --no-measure %*
-  exit /b %ERRORLEVEL%
+  start "" /b py -3 "%ROOT_DIR%scripts\codex-perf-launch.py" --no-measure %* >nul 2>nul
+  exit /b 0
 )
 
-python "%ROOT_DIR%scripts\codex-perf-launch.py" --no-measure %*
-exit /b %ERRORLEVEL%
+start "" /b python "%ROOT_DIR%scripts\codex-perf-launch.py" --no-measure %* >nul 2>nul
+exit /b 0

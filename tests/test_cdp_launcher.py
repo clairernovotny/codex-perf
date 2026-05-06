@@ -75,6 +75,25 @@ class CdpLauncherTests(unittest.TestCase):
         self.assertIn('"-a",', code)
         self.assertNotIn('"-na",', code)
 
+    def test_macos_launch_suppresses_open_output(self):
+        app_path = Path("/Applications/Codex.app")
+        with mock.patch.object(self.launcher.subprocess, "run") as run:
+            self.launcher.launch_macos_codex(app_path, 17373)
+
+        run.assert_called_once_with(
+            [
+                "open",
+                "-a",
+                str(app_path),
+                "--args",
+                "--remote-debugging-address=127.0.0.1",
+                "--remote-debugging-port=17373",
+            ],
+            check=True,
+            stdout=self.launcher.subprocess.DEVNULL,
+            stderr=self.launcher.subprocess.DEVNULL,
+        )
+
     def test_windows_default_app_path_uses_local_app_data_candidates(self):
         app_path = self.launcher.default_app_path(
             system="Windows",
@@ -141,6 +160,8 @@ class CdpLauncherTests(unittest.TestCase):
             ],
             cwd=str(app_path.parent),
             close_fds=True,
+            stdout=self.launcher.subprocess.DEVNULL,
+            stderr=self.launcher.subprocess.DEVNULL,
         )
         run.assert_not_called()
 
@@ -162,6 +183,8 @@ class CdpLauncherTests(unittest.TestCase):
             ],
             cwd=str(app_dir),
             close_fds=True,
+            stdout=self.launcher.subprocess.DEVNULL,
+            stderr=self.launcher.subprocess.DEVNULL,
         )
 
     def test_windows_launch_accepts_msix_package_root_directory(self):
@@ -183,6 +206,8 @@ class CdpLauncherTests(unittest.TestCase):
             ],
             cwd=str(app_dir),
             close_fds=True,
+            stdout=self.launcher.subprocess.DEVNULL,
+            stderr=self.launcher.subprocess.DEVNULL,
         )
 
     def test_windows_launch_reports_missing_codex_exe(self):
@@ -205,6 +230,20 @@ class CdpLauncherTests(unittest.TestCase):
             self.assertNotIn("fix-codex-perf.py\" repair", code)
             self.assertNotIn("fix-codex-perf.py repair", code)
             self.assertNotIn("repair -y", code)
+
+    def test_root_launchers_return_without_console_output(self):
+        shell_code = SHELL_LAUNCHER.read_text(encoding="utf-8")
+        cmd_code = CMD_LAUNCHER.read_text(encoding="utf-8")
+
+        self.assertIn("nohup \"$PYTHON\"", shell_code)
+        self.assertIn(">/dev/null 2>&1 &", shell_code)
+        self.assertIn("exit 0", shell_code)
+        self.assertNotIn("exec \"$PYTHON\"", shell_code)
+
+        self.assertIn("start \"\" /b py -3", cmd_code)
+        self.assertIn("start \"\" /b python", cmd_code)
+        self.assertIn(">nul 2>nul", cmd_code)
+        self.assertIn("exit /b 0", cmd_code)
 
     def test_no_inject_path_stops_existing_renderer_patch(self):
         outer = self
