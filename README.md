@@ -25,6 +25,43 @@ the app is still working.
 - Keep thread titles bounded by calling Codex's `threads.set_title` app action.
 - Start a lightweight `threads.read` prefetch as soon as a thread row is clicked.
 
+## Observed Perf Data
+
+The title problem is large enough to dominate thread-list work. A local
+measurement pass on May 6, 2026 used 2,408 active thread rows and compared the
+same title-list query before and after bounding oversized titles to 120
+characters.
+
+| Metric | Before bounded titles | After bounded titles |
+| --- | ---: | ---: |
+| Active titles over 120 chars | `93` | `0` |
+| Total active title characters | `17,962,096` | `137,194` |
+| Max active title length | `941,848` | `120` |
+| Title-list payload | `18,970,749 bytes` | `45,676 bytes` |
+| Title-list SQLite query median | `6.020 ms` | `0.180 ms` |
+| Title-list SQLite query p95 | `6.751 ms` | `0.552 ms` |
+| Title-list JSON encode median | `75.058 ms` | `0.162 ms` |
+| Title-list JSON encode p95 | `79.421 ms` | `0.303 ms` |
+
+That is a `99.8%` payload reduction for the title-list response and moves JSON
+encoding from tens of milliseconds to sub-millisecond. The extreme case was one
+thread title carrying `941,848` characters where the UI needed a short label.
+
+The runtime fixer uses the same 120-character ceiling. A later drift check found
+one new title at `137` characters; the same app-action repair path brought the
+max active title length back to `120`.
+
+Thread-click measurements are stored under `artifacts/`. The clean injected CDP
+run in `artifacts/codex-perf-cdp-20260506-021020/` recorded:
+
+| Metric | Value |
+| --- | ---: |
+| First visible content | `27.900 ms` |
+| Settled thread shell | `144.600 ms` |
+| Long task count | `0` |
+| Total long task duration | `0 ms` |
+| Transient heap spike | `91,844,356 bytes` |
+
 ## Quick Start
 
 macOS:
@@ -81,11 +118,12 @@ Default app path resolution:
 | Platform | Default |
 | --- | --- |
 | macOS | `/Applications/Codex.app` |
-| Windows | `CODEX_DESKTOP_PATH`, then common Codex Desktop install locations |
+| Windows | Common Codex Desktop install locations, including MSIX packages under `WindowsApps` |
 
 Windows candidates include:
 
 ```text
+%ProgramFiles%\WindowsApps\OpenAI.Codex_*\app\Codex.exe
 %LOCALAPPDATA%\Programs\Codex\Codex.exe
 %LOCALAPPDATA%\Programs\codex\Codex.exe
 %LOCALAPPDATA%\Programs\OpenAI Codex\Codex.exe
@@ -96,11 +134,14 @@ Windows candidates include:
 %ProgramFiles(x86)%\OpenAI Codex\Codex.exe
 ```
 
-Use an explicit executable path when needed:
+Use an explicit executable or `app` directory path when needed:
 
 ```cmd
 codex-perf.cmd --app-path "C:\path\to\Codex.exe"
+codex-perf.cmd --app-path "C:\Program Files\WindowsApps\OpenAI.Codex_26.429.8261.0_x64__2p2nqsd0c76g0\app"
 ```
+
+`CODEX_DESKTOP_PATH` is also honored when set.
 
 ## Title Repair
 

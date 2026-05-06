@@ -82,6 +82,21 @@ class CdpLauncherTests(unittest.TestCase):
         )
         self.assertEqual(app_path, "C:/Users/Claire/AppData/Local/Programs/Codex/Codex.exe")
 
+    def test_windows_default_app_path_finds_windowsapps_msix_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Program Files"
+            app_dir = root / "WindowsApps" / "OpenAI.Codex_26.429.8261.0_x64__2p2nqsd0c76g0" / "app"
+            app_dir.mkdir(parents=True)
+            exe = app_dir / "Codex.exe"
+            exe.write_bytes(b"")
+
+            app_path = self.launcher.default_app_path(
+                system="Windows",
+                environ={"ProgramFiles": str(root)},
+            )
+
+        self.assertEqual(app_path, str(exe))
+
     def test_windows_launch_starts_codex_exe_with_cdp_args(self):
         with tempfile.TemporaryDirectory() as tmp:
             app_path = Path(tmp) / "Codex.exe"
@@ -101,6 +116,26 @@ class CdpLauncherTests(unittest.TestCase):
             close_fds=True,
         )
         run.assert_not_called()
+
+    def test_windows_launch_accepts_msix_app_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app_dir = Path(tmp) / "WindowsApps" / "OpenAI.Codex_26.429.8261.0_x64__2p2nqsd0c76g0" / "app"
+            app_dir.mkdir(parents=True)
+            exe = app_dir / "Codex.exe"
+            exe.write_bytes(b"")
+            with mock.patch.object(self.launcher.platform, "system", return_value="Windows"):
+                with mock.patch.object(self.launcher.subprocess, "Popen") as popen:
+                    self.launcher.launch_codex(app_dir, 17373, None)
+
+        popen.assert_called_once_with(
+            [
+                str(exe),
+                "--remote-debugging-address=127.0.0.1",
+                "--remote-debugging-port=17373",
+            ],
+            cwd=str(app_dir),
+            close_fds=True,
+        )
 
     def test_windows_launch_reports_missing_codex_exe(self):
         with tempfile.TemporaryDirectory() as tmp:

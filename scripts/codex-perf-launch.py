@@ -63,6 +63,31 @@ def windows_app_path_candidates(environ: dict[str, str] | None = None) -> list[P
                 root / "Codex" / "Codex.exe",
                 root / "OpenAI Codex" / "Codex.exe",
             ])
+            candidates.extend(windows_store_app_path_candidates(root))
+    return candidates
+
+
+def windows_store_app_path_candidates(program_files: Path) -> list[Path]:
+    windows_apps = program_files / "WindowsApps"
+    candidates: list[Path] = []
+    if not windows_apps.exists():
+        return [
+            windows_apps / "OpenAI.Codex_*" / "app" / "Codex.exe",
+        ]
+    try:
+        packages = sorted(windows_apps.glob("OpenAI.Codex_*"))
+    except OSError:
+        return [
+            windows_apps / "OpenAI.Codex_*" / "app" / "Codex.exe",
+        ]
+    for package in packages:
+        candidates.extend([
+            package / "app" / "Codex.exe",
+            package / "app" / "codex.exe",
+            package / "Codex.exe",
+        ])
+    if not candidates:
+        candidates.append(windows_apps / "OpenAI.Codex_*" / "app" / "Codex.exe")
     return candidates
 
 
@@ -79,6 +104,15 @@ def default_app_path(system: str | None = None, environ: dict[str, str] | None =
             return str(candidates[0])
         return "Codex.exe"
     return "codex"
+
+
+def resolve_windows_app_executable(app_path: Path) -> Path:
+    if app_path.is_dir():
+        for name in ("Codex.exe", "codex.exe"):
+            candidate = app_path / name
+            if candidate.exists():
+                return candidate
+    return app_path
 
 
 def find_free_port() -> int:
@@ -297,17 +331,18 @@ def launch_macos_codex(app_path: Path, port: int) -> None:
 
 
 def launch_windows_codex(app_path: Path, port: int) -> None:
-    if not app_path.exists():
+    executable = resolve_windows_app_executable(app_path)
+    if not executable.exists() or executable.is_dir():
         candidates = "\n  ".join(str(path) for path in windows_app_path_candidates())
         hint = f" Tried:\n  {candidates}" if candidates else ""
         raise RuntimeError(f"Codex Desktop executable not found: {app_path}.{hint}")
     subprocess.Popen(
         [
-            str(app_path),
+            str(executable),
             "--remote-debugging-address=127.0.0.1",
             f"--remote-debugging-port={port}",
         ],
-        cwd=str(app_path.parent),
+        cwd=str(executable.parent),
         close_fds=True,
     )
 
