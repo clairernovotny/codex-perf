@@ -48,6 +48,46 @@ class RendererPatchTests(unittest.TestCase):
         ]:
             self.assertIn(signal, code)
 
+    def test_thread_clicks_keep_native_navigation_and_only_prefetch(self):
+        code = PATCH.read_text(encoding="utf-8")
+        for required in [
+            "requestAppAction",
+            "prefetchNativeThreadPage",
+            "debug-run-app-action-request",
+            "debug-run-app-action-response",
+            "threads.read",
+            "threads.set_title",
+            "native-thread-prefetch",
+        ]:
+            self.assertIn(required, code)
+        for forbidden in [
+            "startLightweightThreadView",
+            "renderLightweightShell",
+            "LIGHTWEIGHT_VIEW_ID",
+            "preventDefault",
+            "stopImmediatePropagation",
+            "threadDataUrl",
+            "fetch(",
+            "lightweightEndpointAvailable",
+            "127.0.0.1",
+        ]:
+            self.assertNotIn(forbidden, code)
+
+    def test_title_repair_runs_periodic_guarded_app_action_loop(self):
+        code = PATCH.read_text(encoding="utf-8")
+        for required in [
+            "TITLE_REPAIR_INTERVAL_MS",
+            "TITLE_REPAIR_LIST_LIMIT",
+            "schedulePeriodicTitleRepair",
+            "runPeriodicTitleRepair",
+            "repairTitleFromThreadSummary",
+            'type: "threads.list"',
+            'type: "threads.set_title"',
+            "titleRepairTimer",
+            "lastTitleRepairByThread",
+        ]:
+            self.assertIn(required, code)
+
 
 if __name__ == "__main__":
     unittest.main()

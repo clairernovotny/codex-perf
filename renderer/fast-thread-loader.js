@@ -3,16 +3,20 @@
 const PATCH_ID = "codex-perf-fast-thread-loader";
 const KILL_SWITCH_KEY = `${PATCH_ID}:disabled`;
 const STYLE_ID = `${PATCH_ID}:style`;
-const LIGHTWEIGHT_VIEW_ID = `${PATCH_ID}:lightweight-view`;
 const NAV_TIMEOUT_MS = 8000;
 const IDLE_GRACE_MS = 250;
 const OLDER_CONTROL_COOLDOWN_MS = 2000;
+const APP_ACTION_TIMEOUT_MS = 5000;
+const NATIVE_THREAD_PAGE_LIMIT = 10;
+const TITLE_MAX_LEN = 120;
+const TITLE_REPAIR_INTERVAL_MS = 30000;
+const TITLE_REPAIR_COOLDOWN_MS = 60000;
+const TITLE_REPAIR_LIST_LIMIT = 50;
 const THREAD_ROW_SELECTOR = [
   "[data-app-action-sidebar-thread-row]",
   "[data-thread-id]",
   "[data-testid*='thread' i]"
 ].join(", ");
-const THREAD_TITLE_SELECTOR = "[data-app-action-sidebar-thread-title]";
 const THREAD_FIND_COMPOSER_SELECTOR = "[data-thread-find-composer]";
 const THREAD_CONTENT_SELECTOR = [
   "[data-codex-thread-turn]",
@@ -79,97 +83,6 @@ function installStyle() {
     html[data-codex-perf-thread-fastpath="1"] [data-codex-perf-preview-capture] {
       content-visibility: hidden;
     }
-
-    #${LIGHTWEIGHT_VIEW_ID} {
-      position: fixed;
-      inset: 0 0 0 min(360px, 32vw);
-      z-index: 2147483000;
-      overflow: auto;
-      background: var(--color-token-main-surface-primary, var(--vscode-editor-background, Canvas));
-      color: var(--color-token-text-primary, var(--vscode-editor-foreground, CanvasText));
-      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      contain: strict;
-    }
-
-    #${LIGHTWEIGHT_VIEW_ID} .codex-perf-thread-shell {
-      max-width: 860px;
-      margin: 0 auto;
-      padding: 18px 28px 72px;
-    }
-
-    #${LIGHTWEIGHT_VIEW_ID} .codex-perf-thread-header {
-      padding: 4px 0 22px;
-    }
-
-    #${LIGHTWEIGHT_VIEW_ID} h1 {
-      margin: 0;
-      font-size: 17px;
-      line-height: 1.3;
-      font-weight: 650;
-      letter-spacing: 0;
-    }
-
-    #${LIGHTWEIGHT_VIEW_ID} .codex-perf-thread-meta {
-      margin-top: 6px;
-      opacity: .7;
-      font-size: 12px;
-    }
-
-    #${LIGHTWEIGHT_VIEW_ID} .codex-perf-thread-turn {
-      margin: 0 0 18px;
-      padding: 0;
-      border: 0;
-      border-radius: 0;
-      contain: layout paint style;
-      content-visibility: auto;
-      contain-intrinsic-size: auto 120px;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-    }
-
-    #${LIGHTWEIGHT_VIEW_ID} .codex-perf-thread-turn[data-role="user"] {
-      display: flex;
-      justify-content: flex-end;
-    }
-
-    #${LIGHTWEIGHT_VIEW_ID} .codex-perf-thread-bubble {
-      max-width: min(720px, 88%);
-      padding: 10px 13px;
-      border-radius: 14px;
-      background: transparent;
-    }
-
-    #${LIGHTWEIGHT_VIEW_ID} .codex-perf-thread-turn[data-role="user"] .codex-perf-thread-bubble {
-      background: var(--color-token-message-surface, color-mix(in oklab, currentColor 8%, transparent));
-    }
-
-    #${LIGHTWEIGHT_VIEW_ID} .codex-perf-thread-turn[data-role="tool"] .codex-perf-thread-bubble {
-      max-width: 100%;
-      font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-      font-size: 12px;
-      color: var(--color-token-text-secondary, currentColor);
-      background: color-mix(in oklab, currentColor 6%, transparent);
-      border: 1px solid color-mix(in oklab, currentColor 10%, transparent);
-    }
-
-    #${LIGHTWEIGHT_VIEW_ID} .codex-perf-thread-role {
-      display: inline-block;
-      margin-bottom: 8px;
-      font-size: 11px;
-      font-weight: 650;
-      text-transform: uppercase;
-      opacity: .62;
-    }
-
-    #${LIGHTWEIGHT_VIEW_ID} .codex-perf-thread-turn[data-role="assistant"] .codex-perf-thread-role,
-    #${LIGHTWEIGHT_VIEW_ID} .codex-perf-thread-turn[data-role="user"] .codex-perf-thread-role {
-      display: none;
-    }
-
-    #${LIGHTWEIGHT_VIEW_ID} .codex-perf-thread-note {
-      margin: 18px 0 0;
-      opacity: .72;
-    }
   `;
   document.head.appendChild(style);
   return style;
@@ -184,7 +97,10 @@ function createRuntime() {
   let stopped = false;
   let bridgePatched = false;
   let bridgePatchAttempts = 0;
-  let lightweightAbort = null;
+  let appActionRequestSeq = 0;
+  let titleRepairTimer = null;
+  let titleRepairInFlight = false;
+  const lastTitleRepairByThread = new Map();
   const stats = {
     bridgeRequests: 0,
     bridgeResponses: 0,
@@ -193,11 +109,15 @@ function createRuntime() {
     olderTurnPagesObserved: 0,
     olderTurnControlClicks: 0,
     lastOlderTurnSignalAt: null,
-    lightweightViews: 0,
-    lightweightPageLoads: 0,
-    lightweightBackgroundLoads: 0,
-    lightweightPreloadedHits: 0,
-    lightweightPreloadedTurnCount: 0,
+    nativeThreadPrefetches: 0,
+    nativeThreadPrefetchFailures: 0,
+    nativeAppActionRequests: 0,
+    nativeAppActionResponses: 0,
+    nativeAppActionFailures: 0,
+    titleRepairQueued: 0,
+    titleRepairSucceeded: 0,
+    titleRepairFailed: 0,
+    titleRepairPeriodicRuns: 0,
   };
 
   try {
@@ -229,12 +149,11 @@ function createRuntime() {
     }
   }
 
-  function escapeHtml(value) {
-    return String(value == null ? "" : value)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
+  function clearTitleRepairTimer() {
+    if (titleRepairTimer !== null) {
+      window.clearTimeout(titleRepairTimer);
+      titleRepairTimer = null;
+    }
   }
 
   function log(level, message, detail) {
@@ -290,8 +209,8 @@ function createRuntime() {
     const row = event.target && event.target.closest
       ? event.target.closest("[data-app-action-sidebar-thread-row]")
       : null;
-    if (row && startLightweightThreadView(row, event)) {
-      return;
+    if (row) {
+      prefetchNativeThreadPage(row);
     }
     const target = event.target && event.target.closest
       ? event.target.closest(`a,button,[role='button'],[data-thread-id],[data-testid*='thread'],${THREAD_ROW_SELECTOR}`)
@@ -306,202 +225,170 @@ function createRuntime() {
     return raw.startsWith("local:") ? raw.slice("local:".length) : raw;
   }
 
-  function getThreadTitleFromRow(row) {
-    return row.getAttribute("data-app-action-sidebar-thread-title") ||
-      row.querySelector(THREAD_TITLE_SELECTOR)?.textContent ||
-      row.textContent ||
-      "Thread";
-  }
-
-  function getPreloadedThread(threadId) {
-    const preloaded = activeRuntime && activeRuntime.api && activeRuntime.api.preloadedThreads;
-    if (!preloaded || !preloaded.threads) {
-      return null;
+  function requestAppAction(action, timeoutMs = APP_ACTION_TIMEOUT_MS) {
+    if (stopped || typeof window.postMessage !== "function") {
+      return Promise.reject(new Error("app action bus is unavailable"));
     }
-    return preloaded.threads[threadId] || preloaded.threads[`local:${threadId}`] || null;
-  }
-
-  function startLightweightThreadView(row, event) {
-    const endpoint = activeRuntime && activeRuntime.api && activeRuntime.api.threadDataUrl;
-    if (!endpoint || storageDisabled()) {
-      return false;
-    }
-    const threadId = getThreadIdFromRow(row);
-    if (!threadId) {
-      return false;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    if (typeof event.stopImmediatePropagation === "function") {
-      event.stopImmediatePropagation();
-    }
-    beginNavigation("lightweight-thread-view");
-    renderLightweightShell({
-      threadId,
-      title: getThreadTitleFromRow(row),
-      cwd: "",
-      turns: [],
-      note: "Loading local thread view...",
-    });
-    stats.lightweightViews += 1;
-    const preloaded = getPreloadedThread(threadId);
-    if (preloaded) {
-      renderLightweightPreloaded(threadId, preloaded);
-      return true;
-    }
-    loadLightweightThreadPage(threadId, 0, true);
-    return true;
-  }
-
-  function getLightweightView() {
-    let view = document.getElementById(LIGHTWEIGHT_VIEW_ID);
-    if (!view) {
-      view = document.createElement("section");
-      view.id = LIGHTWEIGHT_VIEW_ID;
-      view.setAttribute("aria-live", "polite");
-      view.setAttribute("aria-label", "Codex thread");
-      document.body.appendChild(view);
-      cleanup.push(() => view.remove());
-    }
-    return view;
-  }
-
-  function renderLightweightShell({ threadId, title, cwd, turns, note, page }) {
-    const view = getLightweightView();
-    const body = turns.map((turn) => `
-      <article class="codex-perf-thread-turn" data-role="${escapeHtml(turn.role || turn.type || "turn")}" data-codex-perf-lightweight-turn="${escapeHtml(turn.line)}">
-        <div class="codex-perf-thread-bubble">
-          <div class="codex-perf-thread-role">${escapeHtml(turn.role || turn.type || "turn")}</div>
-          <div>${escapeHtml(turn.text || "")}</div>
-        </div>
-      </article>
-    `).join("");
-    view.innerHTML = `
-      <div class="codex-perf-thread-shell" data-codex-perf-lightweight-thread="${escapeHtml(threadId)}">
-        <header class="codex-perf-thread-header">
-          <h1>${escapeHtml(title)}</h1>
-          <div class="codex-perf-thread-meta">${escapeHtml(cwd || "")}</div>
-        </header>
-        ${body || `<p class="codex-perf-thread-note">${escapeHtml(note || "")}</p>`}
-      </div>
-    `;
-  }
-
-  async function loadLightweightThreadPage(threadId, cursor, foreground) {
-    const endpoint = activeRuntime && activeRuntime.api && activeRuntime.api.threadDataUrl;
-    if (!endpoint || stopped) {
-      return;
-    }
-    if (foreground && lightweightAbort) {
-      lightweightAbort.abort();
-    }
-    const controller = new AbortController();
-    if (foreground) {
-      lightweightAbort = controller;
-    }
-    const separator = endpoint.includes("?") ? "&" : "?";
-    const url = `${endpoint}${separator}thread_id=${encodeURIComponent(threadId)}&cursor=${encodeURIComponent(cursor)}&limit=20`;
-    try {
-      const response = await fetch(url, { signal: controller.signal });
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      const data = await response.json();
-      stats.lightweightPageLoads += 1;
-      if (foreground) {
-        renderLightweightShell({
-          threadId,
-          title: data.thread?.title || threadId,
-          cwd: data.thread?.cwd || "",
-          turns: data.turns || [],
-          page: data.page || null,
-        });
-        firstPaint();
-      } else {
-        appendLightweightTurns(data.turns || []);
-        stats.lightweightBackgroundLoads += 1;
-      }
-      if (data.page && data.page.has_more && data.page.next_cursor != null) {
-        stats.lastOlderTurnSignalAt = Date.now();
-        nowMark("older-turns-loaded");
-        emit("older-turns-loaded", { method: "lightweight-local-page", cursor: data.page.next_cursor });
-        const run = () => loadLightweightThreadPage(threadId, data.page.next_cursor, false);
-        if (typeof requestIdleCallback === "function") {
-          requestIdleCallback(run, { timeout: 1000 });
-        } else {
-          window.setTimeout(run, 250);
-        }
-      }
-    } catch (error) {
-      if (error && error.name === "AbortError") {
-        return;
-      }
-      renderLightweightShell({
-        threadId,
-        title: threadId,
-        cwd: "",
-        turns: [],
-        note: `Local thread view failed open: ${String(error)}`,
-      });
-      endNavigation("lightweight-error");
-    }
-  }
-
-  function renderLightweightPreloaded(threadId, data) {
-    const turns = Array.isArray(data.turns) ? data.turns : [];
-    const newest = turns.slice(-20);
-    stats.lightweightPreloadedHits += 1;
-    stats.lightweightPreloadedTurnCount = turns.length;
-    stats.lightweightPageLoads += 1;
-    renderLightweightShell({
-      threadId,
-      title: data.thread?.title || threadId,
-      cwd: data.thread?.cwd || "",
-      turns: newest,
-      page: { has_more: turns.length > newest.length },
-    });
-    firstPaint();
-    if (turns.length > newest.length) {
-      stats.lastOlderTurnSignalAt = Date.now();
-      nowMark("older-turns-loaded");
-      emit("older-turns-loaded", { method: "preloaded-local-page", count: turns.length - newest.length });
-      let cursor = turns.length - newest.length;
-      const appendChunk = () => {
-        if (stopped || cursor <= 0) {
+    stats.nativeAppActionRequests += 1;
+    const requestId = `${PATCH_ID}:${Date.now()}:${++appActionRequestSeq}`;
+    const targetOrigin = window.location.origin && window.location.origin !== "null"
+      ? window.location.origin
+      : "*";
+    const payload = {
+      type: "debug-run-app-action-request",
+      requestId,
+      action,
+    };
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanupListeners = () => {
+        window.removeEventListener("message", onMessage, true);
+        window.removeEventListener("codex-message-from-view", onCustomEvent, true);
+        window.clearTimeout(timer);
+      };
+      const settle = (fn, value) => {
+        if (settled) {
           return;
         }
-        const start = Math.max(0, cursor - 20);
-        appendLightweightTurns(turns.slice(start, cursor));
-        cursor = start;
-        stats.lightweightBackgroundLoads += 1;
-        if (cursor > 0) {
-          if (typeof requestIdleCallback === "function") {
-            requestIdleCallback(appendChunk, { timeout: 1000 });
-          } else {
-            window.setTimeout(appendChunk, 250);
-          }
+        settled = true;
+        cleanupListeners();
+        fn(value);
+      };
+      const handleResponse = (message) => {
+        if (!message || message.type !== "debug-run-app-action-response" || message.requestId !== requestId) {
+          return;
+        }
+        stats.nativeAppActionResponses += 1;
+        if (message.ok) {
+          settle(resolve, message.result);
+        } else {
+          stats.nativeAppActionFailures += 1;
+          settle(reject, new Error(message.errorMessage || "app action failed"));
         }
       };
-      appendChunk();
+      const onMessage = (event) => handleResponse(event.data);
+      const onCustomEvent = (event) => handleResponse(event.detail);
+      const timer = window.setTimeout(() => {
+        stats.nativeAppActionFailures += 1;
+        settle(reject, new Error(`app action timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      window.addEventListener("message", onMessage, true);
+      window.addEventListener("codex-message-from-view", onCustomEvent, true);
+      window.postMessage(payload, targetOrigin);
+    });
+  }
+
+  async function prefetchNativeThreadPage(row) {
+    const threadId = getThreadIdFromRow(row);
+    if (!threadId || stopped || storageDisabled()) {
+      return;
+    }
+    try {
+      await requestAppAction({
+        type: "threads.read",
+        threadId,
+        limit: NATIVE_THREAD_PAGE_LIMIT,
+        includeOutputs: false,
+        maxOutputChars: 2000,
+      }, 8000);
+      stats.nativeThreadPrefetches += 1;
+      emit("native-thread-prefetch", { threadId });
+    } catch (error) {
+      stats.nativeThreadPrefetchFailures += 1;
+      log("debug", "native-thread-prefetch-failed", { threadId, error: String(error && error.message || error) });
     }
   }
 
-  function appendLightweightTurns(turns) {
-    const shell = document.getElementById(LIGHTWEIGHT_VIEW_ID)?.querySelector(".codex-perf-thread-shell");
-    if (!shell || !turns.length) {
+  function truncateTitle(text) {
+    return text.length > TITLE_MAX_LEN ? `${text.slice(0, Math.max(TITLE_MAX_LEN - 3, 0))}...` : text;
+  }
+
+  function summarizeTitle(text) {
+    let firstLine = String(text == null ? "" : text).split("\n", 1)[0];
+    if (firstLine.endsWith("\r")) {
+      firstLine = firstLine.slice(0, -1);
+    }
+    return truncateTitle(firstLine.trim());
+  }
+
+  function repairTitleForThreadSummary(thread) {
+    if (!thread || typeof thread !== "object") {
+      return null;
+    }
+    const currentTitle = String(thread.title || "").trim();
+    const preview = String(thread.preview || "").trim();
+    const source = preview || currentTitle;
+    const repairedTitle = summarizeTitle(source);
+    if (!thread.id || !repairedTitle || currentTitle === repairedTitle) {
+      return null;
+    }
+    const titleIsLong = currentTitle.length > TITLE_MAX_LEN;
+    const titleIsPreviewFallback = preview.length > TITLE_MAX_LEN && currentTitle === preview;
+    return titleIsLong || titleIsPreviewFallback ? { threadId: thread.id, title: repairedTitle } : null;
+  }
+
+  async function repairTitleFromThreadSummary(thread) {
+    const item = repairTitleForThreadSummary(thread);
+    if (!item) {
+      return false;
+    }
+    const last = lastTitleRepairByThread.get(item.threadId);
+    const now = Date.now();
+    if (last && last.title === item.title && now - last.at < TITLE_REPAIR_COOLDOWN_MS) {
+      return false;
+    }
+    lastTitleRepairByThread.set(item.threadId, { title: item.title, at: now });
+    try {
+      await requestAppAction({
+        type: "threads.set_title",
+        threadId: item.threadId,
+        title: item.title,
+      }, 8000);
+      stats.titleRepairSucceeded += 1;
+      return true;
+    } catch (error) {
+      stats.titleRepairFailed += 1;
+      log("warn", "periodic-title-repair-failed", { threadId: item.threadId, error: String(error && error.message || error) });
+      return false;
+    }
+  }
+
+  async function runPeriodicTitleRepair() {
+    if (stopped || storageDisabled() || titleRepairInFlight) {
       return;
     }
-    const fragment = document.createDocumentFragment();
-    for (const turn of turns) {
-      const article = document.createElement("article");
-      article.className = "codex-perf-thread-turn";
-      article.setAttribute("data-role", String(turn.role || turn.type || "turn"));
-      article.setAttribute("data-codex-perf-lightweight-turn", String(turn.line || ""));
-      article.innerHTML = `<div class="codex-perf-thread-bubble"><div class="codex-perf-thread-role">${escapeHtml(turn.role || turn.type || "turn")}</div><div>${escapeHtml(turn.text || "")}</div></div>`;
-      fragment.insertBefore(article, fragment.firstChild);
+    titleRepairInFlight = true;
+    stats.titleRepairPeriodicRuns += 1;
+    try {
+      const data = await requestAppAction({
+        type: "threads.list",
+        limit: TITLE_REPAIR_LIST_LIMIT,
+      }, 8000);
+      const threads = Array.isArray(data?.threads) ? data.threads : [];
+      for (const thread of threads) {
+        if (stopped) {
+          break;
+        }
+        await repairTitleFromThreadSummary(thread);
+      }
+    } catch (error) {
+      stats.titleRepairFailed += 1;
+      log("debug", "periodic-title-repair-list-failed", { error: String(error && error.message || error) });
+    } finally {
+      titleRepairInFlight = false;
     }
-    const header = shell.querySelector(".codex-perf-thread-header");
-    shell.insertBefore(fragment, header ? header.nextSibling : shell.firstChild);
+  }
+
+  function schedulePeriodicTitleRepair(initialDelayMs = TITLE_REPAIR_INTERVAL_MS) {
+    clearTitleRepairTimer();
+    if (stopped || storageDisabled()) {
+      return;
+    }
+    titleRepairTimer = window.setTimeout(async () => {
+      titleRepairTimer = null;
+      await runPeriodicTitleRepair();
+      schedulePeriodicTitleRepair(TITLE_REPAIR_INTERVAL_MS);
+    }, initialDelayMs);
   }
 
   function onPopState() {
@@ -779,6 +666,8 @@ function createRuntime() {
   retryPatchElectronBridge();
   observeThreadContent();
   scheduleOlderTurnLoad();
+  schedulePeriodicTitleRepair(5000);
+  cleanup.push(clearTitleRepairTimer);
 
   return {
     api: null,
@@ -786,10 +675,6 @@ function createRuntime() {
       stopped = true;
       active = false;
       clearTimers();
-      if (lightweightAbort) {
-        lightweightAbort.abort();
-        lightweightAbort = null;
-      }
       document.documentElement.removeAttribute("data-codex-perf-thread-fastpath");
       while (cleanup.length) {
         const fn = cleanup.pop();

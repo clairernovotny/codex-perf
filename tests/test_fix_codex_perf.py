@@ -220,15 +220,12 @@ class BackupRepairRestoreTests(unittest.TestCase):
             self.assertTrue(title.endswith("..."))
             self.assertNotEqual(title, first_user_message)
 
-            rollout_lines = [json.loads(line) for line in rollout.read_text(encoding="utf-8").splitlines()]
-            title_events = [
-                line
-                for line in rollout_lines
-                if line.get("type") == "event_msg"
-                and line.get("payload", {}).get("type") == "ThreadNameUpdated"
-            ]
-            self.assertEqual(len(title_events), 1)
-            self.assertEqual(title_events[0]["payload"]["thread_name"], title)
+            self.assertEqual(original_hashes[rollout], sha256(rollout))
+            index_lines = [json.loads(line) for line in index.read_text(encoding="utf-8").splitlines()]
+            title_events = [line for line in index_lines if line.get("id") == thread_id]
+            self.assertEqual(len(title_events), 2)
+            self.assertEqual(title_events[-1]["thread_name"], title)
+            self.assertIn("updated_at", title_events[-1])
 
             second = subprocess.run(
                 [
@@ -246,12 +243,39 @@ class BackupRepairRestoreTests(unittest.TestCase):
                 check=True,
             )
             self.assertIn("repaired=0", second.stdout)
-            rollout_events_after_second = [
+            index_events_after_second = [
                 json.loads(line)
-                for line in rollout.read_text(encoding="utf-8").splitlines()
-                if "ThreadNameUpdated" in line
+                for line in index.read_text(encoding="utf-8").splitlines()
+                if json.loads(line).get("id") == thread_id
             ]
-            self.assertEqual(len(rollout_events_after_second), 1)
+            self.assertEqual(len(index_events_after_second), 2)
+
+            con = sqlite3.connect(db)
+            con.execute("UPDATE threads SET title=first_user_message WHERE id=?", (thread_id,))
+            con.commit()
+            con.close()
+            third = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--codex-home",
+                    str(home),
+                    "repair",
+                    "--backup-dir",
+                    str(backup_dir),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            self.assertIn("repaired=1", third.stdout)
+            index_events_after_rewrite = [
+                json.loads(line)
+                for line in index.read_text(encoding="utf-8").splitlines()
+                if json.loads(line).get("id") == thread_id
+            ]
+            self.assertEqual(len(index_events_after_rewrite), 2)
 
             subprocess.run(
                 [
@@ -373,6 +397,42 @@ class BackupRepairRestoreTests(unittest.TestCase):
                 manifest["killed_codex_processes"],
                 [{"pid": 4321, "name": "codex", "command": "/tmp/bin/codex app-server"}],
             )
+
+    def test_repair_skips_process_detection_when_no_repair_needed_for_default_home(self):
+        tool = load_tool()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            home, thread_id = make_home(tmp_path)
+            clean_title = tool.summarize_for_label("  " + ("x" * 121) + "\nsecond line must be ignored")
+            con = sqlite3.connect(home / "state_5.sqlite")
+            con.execute("UPDATE threads SET title=? WHERE id=?", (clean_title, thread_id))
+            con.commit()
+            con.close()
+
+            original_default_home = tool.default_codex_home
+            original_detect = tool.detect_codex_processes
+            original_thread_loading_metrics = tool.thread_loading_metrics
+            try:
+                tool.default_codex_home = lambda: home
+                tool.detect_codex_processes = lambda: (_ for _ in ()).throw(
+                    AssertionError("process detection should not run when repair is unnecessary")
+                )
+                tool.thread_loading_metrics = lambda codex_home: {"phase": "thread-loading", "app_server_note": "fixture"}
+                args = type(
+                    "Args",
+                    (),
+                    {
+                        "codex_home": str(home),
+                        "backup_dir": str(tmp_path / "backups"),
+                        "yes": True,
+                    },
+                )()
+
+                self.assertEqual(tool.command_repair(args), 0)
+            finally:
+                tool.default_codex_home = original_default_home
+                tool.detect_codex_processes = original_detect
+                tool.thread_loading_metrics = original_thread_loading_metrics
 
     def test_stop_yes_uses_process_safety(self):
         tool = load_tool()

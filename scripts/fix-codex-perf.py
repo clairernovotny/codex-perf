@@ -23,7 +23,6 @@ import sys
 import select
 import tempfile
 import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -32,7 +31,6 @@ from typing import Any, Iterable
 TOOL_VERSION = "0.1.0"
 TITLE_MAX_LEN = 120
 MANIFEST_NAME = "manifest.json"
-THREAD_EVENT_TYPE = "ThreadNameUpdated"
 
 
 @dataclass(frozen=True)
@@ -237,37 +235,6 @@ def latest_session_index_titles(path: Path) -> dict[str, str]:
         if isinstance(thread_id, str) and isinstance(title, str):
             latest[thread_id] = title
     return latest
-
-
-def latest_rollout_title(path: Path) -> str | None:
-    latest = None
-    for obj in load_jsonl(path):
-        payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
-        if obj.get("type") == "ThreadNameUpdated":
-            value = obj.get("thread_name") or obj.get("title")
-        elif payload.get("type") == THREAD_EVENT_TYPE:
-            value = payload.get("thread_name") or payload.get("title") or payload.get("name")
-        else:
-            value = None
-        if isinstance(value, str):
-            latest = value
-    return latest
-
-
-def title_event(thread_id: str, title: str, when: str | None = None) -> dict[str, Any]:
-    when = when or iso_z()
-    return {
-        "timestamp": when,
-        "type": "event_msg",
-        "payload": {
-            "type": THREAD_EVENT_TYPE,
-            "thread_id": thread_id,
-            "thread_name": title,
-            "title": title,
-            "event_id": str(uuid.uuid4()),
-            "updated_at": when,
-        },
-    }
 
 
 def session_index_event(thread_id: str, title: str, when: str | None = None) -> dict[str, Any]:
@@ -923,9 +890,9 @@ def command_stop(args: argparse.Namespace) -> int:
 
 def command_repair(args: argparse.Namespace) -> int:
     codex_home = resolve_codex_home(args.codex_home)
-    killed = preflight_process_safety(codex_home, args.yes)
-    before = metrics_title(codex_home)
     rows = inventory(codex_home)
+    killed = preflight_process_safety(codex_home, args.yes) if rows else []
+    before = metrics_title(codex_home)
     validate_inputs(codex_home, rows)
     backup = create_backup(
         codex_home,
@@ -944,7 +911,7 @@ def command_repair(args: argparse.Namespace) -> int:
     write_metrics_summary(backup / "metrics-summary.md", before, after, thread_metrics, live_note)
     update_manifest_after_repair(backup, changes, integrity_check(codex_home / "state_5.sqlite"))
     print(f"Backup created: {backup}")
-    print(f"Repair summary: repaired={changes['sqlite_rows_updated']} jsonl_events_appended={changes['jsonl_events_appended']} session_index_events_appended={changes['session_index_events_appended']}")
+    print(f"Repair summary: repaired={changes['sqlite_rows_updated']} session_index_events_appended={changes['session_index_events_appended']} rollout_events_appended=0")
     print(f"SQLite integrity after: {changes['sqlite_integrity_after']}")
     print(f"Metrics summary: {backup / 'metrics-summary.md'}")
     return 0
@@ -954,7 +921,7 @@ def apply_repair(codex_home: Path, rows: list[ThreadRow], backup: Path) -> dict[
     if not rows:
         return {
             "sqlite_rows_updated": 0,
-            "jsonl_events_appended": 0,
+            "rollout_events_appended": 0,
             "session_index_events_appended": 0,
             "thread_changes": [],
             "sqlite_integrity_after": integrity_check(codex_home / "state_5.sqlite"),
@@ -963,22 +930,16 @@ def apply_repair(codex_home: Path, rows: list[ThreadRow], backup: Path) -> dict[
     latest_index = latest_session_index_titles(index_path)
     now = iso_z()
     thread_changes: list[dict[str, Any]] = []
-    jsonl_events = 0
     index_events = 0
 
     for row in rows:
         new_title = summarize_for_label(row.first_user_message)
-        existing_rollout_title = latest_rollout_title(row.rollout_path)
-        event_id = None
-        if existing_rollout_title != new_title:
-            event = title_event(row.id, new_title, now)
-            event_id = event["payload"]["event_id"]
-            append_jsonl(row.rollout_path, event)
-            jsonl_events += 1
+        appended_index_event = False
         if latest_index.get(row.id) != new_title:
             append_jsonl(index_path, session_index_event(row.id, new_title, now))
             index_events += 1
             latest_index[row.id] = new_title
+            appended_index_event = True
         thread_changes.append(
             {
                 "id": row.id,
@@ -986,8 +947,8 @@ def apply_repair(codex_home: Path, rows: list[ThreadRow], backup: Path) -> dict[
                 "old_title_length": len(row.title),
                 "new_title_length": len(new_title),
                 "title_equals_first_user_message": row.title == row.first_user_message,
-                "appended_jsonl_event_id": event_id,
-                "appended_jsonl_event_timestamp": now if event_id else None,
+                "appended_session_index_event": appended_index_event,
+                "session_index_event_timestamp": now if appended_index_event else None,
             }
         )
 
@@ -1013,7 +974,7 @@ def apply_repair(codex_home: Path, rows: list[ThreadRow], backup: Path) -> dict[
         raise RuntimeError(f"SQLite integrity check failed after mutation: {after}")
     return {
         "sqlite_rows_updated": updated,
-        "jsonl_events_appended": jsonl_events,
+        "rollout_events_appended": 0,
         "session_index_events_appended": index_events,
         "thread_changes": thread_changes,
         "sqlite_integrity_after": after,

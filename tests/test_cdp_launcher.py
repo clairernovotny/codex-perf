@@ -1,8 +1,5 @@
 import importlib.util
-import json
-import sqlite3
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -10,6 +7,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "codex-perf-launch.py"
 PATCH = ROOT / "renderer" / "fast-thread-loader.js"
+SHELL_LAUNCHER = ROOT / "codex-perf.sh"
+CMD_LAUNCHER = ROOT / "codex-perf.cmd"
 
 
 def load_launcher():
@@ -51,8 +50,36 @@ class CdpLauncherTests(unittest.TestCase):
         self.assertIn("start(api)", source)
         self.assertIn('source: "cdp-wrapper"', source)
         self.assertIn("navigation-start", source)
-        for forbidden in ["state_5.sqlite", "session_index.jsonl", "ThreadNameUpdated"]:
+        for forbidden in ["state_5.sqlite", "session_index.jsonl", "ThreadNameUpdated", "titleRepairPlan"]:
             self.assertNotIn(forbidden, source)
+        for forbidden in ["threadDataUrl", "ThreadDataHttpServer"]:
+            self.assertNotIn(forbidden, source)
+
+    def test_launcher_has_no_thread_data_http_server(self):
+        code = SCRIPT.read_text(encoding="utf-8")
+        for forbidden in [
+            "ThreadDataHttpServer",
+            "http.server",
+            "thread-data server",
+            "--thread-data-port",
+            "--no-thread-data-server",
+            "thread_data_server",
+        ]:
+            self.assertNotIn(forbidden, code)
+
+    def test_root_launchers_do_not_run_offline_repair_before_launch(self):
+        shell_code = SHELL_LAUNCHER.read_text(encoding="utf-8")
+        cmd_code = CMD_LAUNCHER.read_text(encoding="utf-8")
+        for code in [shell_code, cmd_code]:
+            self.assertNotIn("echo codex-perf:", code)
+            self.assertNotIn("printf '%s\\n' \"codex-perf:", code)
+            self.assertNotIn("status --exit-code", code)
+            self.assertNotIn("checking whether title repair is needed", code)
+            self.assertNotIn("repair is needed; checking for running Codex processes", code)
+            self.assertNotIn(" stop -y", code)
+            self.assertNotIn("fix-codex-perf.py\" repair", code)
+            self.assertNotIn("fix-codex-perf.py repair", code)
+            self.assertNotIn("repair -y", code)
 
     def test_no_inject_path_stops_existing_renderer_patch(self):
         outer = self
@@ -73,52 +100,6 @@ class CdpLauncherTests(unittest.TestCase):
         result = self.launcher.stop_existing_renderer_patch(client)
         self.assertTrue(result["hadPatch"])
         self.assertEqual([method for method, _ in client.calls], ["Runtime.enable", "Runtime.evaluate"])
-
-    def test_preloaded_thread_data_reads_recent_rollout_without_state_mutation(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            session_dir = home / "sessions" / "2026" / "01" / "02"
-            session_dir.mkdir(parents=True)
-            thread_id = "019abc00-0000-7000-8000-000000000002"
-            rollout = session_dir / f"rollout-test-{thread_id}.jsonl"
-            rollout.write_text(
-                "\n".join(
-                    [
-                        json.dumps({"timestamp": "2026-01-02T00:00:00Z", "type": "event_msg", "payload": {"type": "user_message", "message": "hello"}}),
-                        json.dumps({"timestamp": "2026-01-02T00:00:01Z", "type": "event_msg", "payload": {"type": "agent_message", "message": "world" * 20}}),
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            con = sqlite3.connect(home / "state_5.sqlite")
-            con.execute(
-                """
-                CREATE TABLE threads (
-                    id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    first_user_message TEXT NOT NULL,
-                    cwd TEXT NOT NULL,
-                    rollout_path TEXT NOT NULL,
-                    updated_at_ms INTEGER,
-                    archived INTEGER DEFAULT 0
-                )
-                """
-            )
-            con.execute(
-                "INSERT INTO threads (id,title,first_user_message,cwd,rollout_path,updated_at_ms,archived) VALUES (?,?,?,?,?,?,0)",
-                (thread_id, "fixture title", "hello", str(ROOT), str(rollout), 2),
-            )
-            con.commit()
-            con.close()
-
-            data = self.launcher.ThreadDataStore(home).preloaded_recent_threads(5, 10, 16)
-            self.assertIn(thread_id, data["threads"])
-            page = data["threads"][thread_id]
-            self.assertEqual(page["thread"]["title"], "fixture title")
-            self.assertEqual(len(page["turns"]), 2)
-            self.assertTrue(page["turns"][1]["text"].endswith("[truncated view]"))
-
 
 if __name__ == "__main__":
     unittest.main()

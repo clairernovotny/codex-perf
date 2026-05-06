@@ -6,8 +6,6 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as dt
-import html
-import http.server
 import json
 import os
 import platform
@@ -15,7 +13,6 @@ import socket
 import struct
 import subprocess
 import sys
-import threading
 import time
 import urllib.parse
 import urllib.request
@@ -41,10 +38,6 @@ def default_renderer_path() -> Path:
 
 def default_output_dir() -> Path:
     return Path.cwd() / "artifacts" / f"codex-perf-cdp-{timestamp_slug()}"
-
-
-def default_codex_home() -> Path:
-    return Path.home() / ".codex"
 
 
 def find_free_port() -> int:
@@ -190,266 +183,10 @@ class CdpClient:
         return bytes(chunks)
 
 
-def safe_text(value: Any, max_chars: int = 20000) -> str:
-    if isinstance(value, str):
-        return value[:max_chars]
-    if value is None:
-        return ""
-    try:
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))[:max_chars]
-    except TypeError:
-        return str(value)[:max_chars]
-
-
-def normalize_thread_id(raw_thread_id: str) -> str:
-    return raw_thread_id.split(":", 1)[1] if raw_thread_id.startswith("local:") else raw_thread_id
-
-
-class ThreadDataStore:
-    def __init__(self, codex_home: Path):
-        self.codex_home = codex_home.expanduser().resolve()
-        self.db_path = self.codex_home / "state_5.sqlite"
-
-    def thread_page(self, raw_thread_id: str, cursor: int = 0, limit: int = 20) -> dict[str, Any]:
-        import sqlite3
-
-        thread_id = normalize_thread_id(raw_thread_id)
-        limit = max(1, min(int(limit), 50))
-        cursor = max(0, int(cursor))
-        with sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True) as con:
-            con.row_factory = sqlite3.Row
-            row = con.execute(
-                """
-                SELECT id, title, first_user_message, cwd, rollout_path, updated_at_ms
-                FROM threads
-                WHERE id = ?
-                """,
-                (thread_id,),
-            ).fetchone()
-        if row is None:
-            raise KeyError(f"Unknown thread id: {thread_id}")
-
-        rollout_path = self.resolve_rollout_path(Path(row["rollout_path"]))
-        turns = self.read_rollout_turns(rollout_path)
-        newest = list(reversed(turns))
-        page_items = list(reversed(newest[cursor : cursor + limit]))
-        next_cursor = cursor + limit if cursor + limit < len(newest) else None
-        return {
-            "thread": {
-                "id": thread_id,
-                "title": row["title"] or row["first_user_message"] or thread_id,
-                "cwd": row["cwd"],
-                "updated_at_ms": row["updated_at_ms"],
-                "rollout_path": str(rollout_path),
-                "turn_count": len(turns),
-            },
-            "page": {
-                "order": "oldest_first_within_page",
-                "cursor": cursor,
-                "limit": limit,
-                "next_cursor": next_cursor,
-                "has_more": next_cursor is not None,
-            },
-            "turns": page_items,
-        }
-
-    def recent_thread_ids(self, limit: int = 30) -> list[str]:
-        import sqlite3
-
-        limit = max(1, min(int(limit), 200))
-        with sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True) as con:
-            rows = con.execute(
-                """
-                SELECT id
-                FROM threads
-                WHERE COALESCE(archived, 0) = 0
-                ORDER BY updated_at_ms DESC, id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-        return [row[0] for row in rows]
-
-    def preloaded_recent_threads(self, thread_limit: int = 30, turn_limit: int = 160, text_limit: int = 4000) -> dict[str, Any]:
-        threads: dict[str, Any] = {}
-        for thread_id in self.recent_thread_ids(thread_limit):
-            try:
-                page = self.thread_page(thread_id, 0, turn_limit)
-            except Exception:
-                continue
-            for turn in page.get("turns", []):
-                if isinstance(turn.get("text"), str) and len(turn["text"]) > text_limit:
-                    turn["text"] = turn["text"][: text_limit - 15] + "\n[truncated view]"
-            page["preloaded"] = True
-            threads[thread_id] = page
-            threads[f"local:{thread_id}"] = page
-        return {
-            "generated_at": utc_now(),
-            "thread_limit": thread_limit,
-            "turn_limit": turn_limit,
-            "text_limit": text_limit,
-            "threads": threads,
-        }
-
-    def resolve_rollout_path(self, path: Path) -> Path:
-        if path.exists():
-            return path
-        try:
-            default_home = default_codex_home().resolve()
-            relative = path.expanduser().resolve().relative_to(default_home)
-            remapped = self.codex_home / relative
-            if remapped.exists():
-                return remapped
-        except (OSError, ValueError):
-            pass
-        return path
-
-    def read_rollout_turns(self, rollout_path: Path) -> list[dict[str, Any]]:
-        turns: list[dict[str, Any]] = []
-        with rollout_path.open("r", encoding="utf-8") as handle:
-            for line_no, line in enumerate(handle, 1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                item = self.rollout_event_to_turn(event, line_no)
-                if item is not None:
-                    turns.append(item)
-        return turns
-
-    def rollout_event_to_turn(self, event: dict[str, Any], line_no: int) -> dict[str, Any] | None:
-        payload = event.get("payload") if isinstance(event, dict) else None
-        if not isinstance(payload, dict):
-            return None
-        timestamp = event.get("timestamp")
-        event_type = event.get("type")
-        if event_type == "event_msg":
-            payload_type = payload.get("type")
-            if payload_type in {"user_message", "UserMessage"}:
-                return {"line": line_no, "role": "user", "type": payload_type, "timestamp": timestamp, "text": safe_text(payload.get("message") or payload.get("text"))}
-            if payload_type in {"agent_message", "AgentMessage"}:
-                return {"line": line_no, "role": "assistant", "type": payload_type, "timestamp": timestamp, "text": safe_text(payload.get("message") or payload.get("text"))}
-            if payload_type in {"task_started", "ThreadNameUpdated"}:
-                return None
-            return None
-        if event_type == "response_item":
-            item_type = payload.get("type")
-            role = payload.get("role")
-            if item_type == "message":
-                if role not in {"user", "assistant"}:
-                    return None
-                return {"line": line_no, "role": safe_text(role, 80), "type": "message", "timestamp": timestamp, "text": self.extract_message_text(payload)}
-            if item_type in {"function_call", "function_call_output"}:
-                return {"line": line_no, "role": "tool", "type": safe_text(item_type, 80), "timestamp": timestamp, "text": self.extract_tool_text(payload)}
-            if item_type in {"reasoning"}:
-                return None
-            return None
-        return None
-
-    def extract_message_text(self, payload: dict[str, Any]) -> str:
-        content = payload.get("content")
-        if isinstance(content, str):
-            return safe_text(content)
-        parts: list[str] = []
-        if isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict):
-                    text = item.get("text") or item.get("input_text") or item.get("output_text")
-                    if isinstance(text, str):
-                        parts.append(text)
-        return safe_text("\n".join(parts) if parts else payload)
-
-    def extract_tool_text(self, payload: dict[str, Any]) -> str:
-        name = payload.get("name") or payload.get("call_id") or payload.get("type") or "tool"
-        output = payload.get("output") or payload.get("arguments") or payload.get("content") or ""
-        text = safe_text(output, 2000)
-        return f"{name}: {text}" if text else safe_text(name, 2000)
-
-
-class ThreadDataHttpServer:
-    def __init__(self, store: ThreadDataStore, port: int = 0):
-        self.store = store
-        self.token = base64.urlsafe_b64encode(os.urandom(18)).decode("ascii").rstrip("=")
-        parent = self
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def log_message(self, fmt: str, *args: Any) -> None:
-                return
-
-            def do_OPTIONS(self) -> None:
-                self.send_response(204)
-                self._cors()
-                self.end_headers()
-
-            def do_GET(self) -> None:
-                parsed = urllib.parse.urlparse(self.path)
-                if parsed.path != "/thread":
-                    self._json(404, {"error": "not-found"})
-                    return
-                query = urllib.parse.parse_qs(parsed.query)
-                if query.get("token", [""])[0] != parent.token:
-                    self._json(403, {"error": "forbidden"})
-                    return
-                thread_id = query.get("thread_id", [""])[0]
-                if not thread_id:
-                    self._json(400, {"error": "missing-thread-id"})
-                    return
-                try:
-                    cursor = int(query.get("cursor", ["0"])[0])
-                    limit = int(query.get("limit", ["20"])[0])
-                    self._json(200, parent.store.thread_page(thread_id, cursor, limit))
-                except KeyError as exc:
-                    self._json(404, {"error": str(exc)})
-                except Exception as exc:
-                    self._json(500, {"error": str(exc)})
-
-            def _cors(self) -> None:
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-                self.send_header("Access-Control-Allow-Headers", "content-type")
-                self.send_header("Access-Control-Allow-Private-Network", "true")
-
-            def _json(self, status: int, value: dict[str, Any]) -> None:
-                body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-                self.send_response(status)
-                self._cors()
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
-        self.thread = threading.Thread(target=self.httpd.serve_forever, name="codex-perf-thread-data", daemon=True)
-
-    @property
-    def port(self) -> int:
-        return int(self.httpd.server_address[1])
-
-    @property
-    def endpoint(self) -> str:
-        return f"http://127.0.0.1:{self.port}/thread?token={urllib.parse.quote(self.token)}"
-
-    def start(self) -> "ThreadDataHttpServer":
-        self.thread.start()
-        return self
-
-    def stop(self) -> None:
-        self.httpd.shutdown()
-        self.httpd.server_close()
-        self.thread.join(timeout=2)
-
-
 def build_injection_source(
     renderer_path: Path,
-    thread_data_url: str | None = None,
-    preloaded_threads: dict[str, Any] | None = None,
 ) -> str:
     renderer_source = renderer_path.read_text(encoding="utf-8")
-    thread_data_url_json = json.dumps(thread_data_url)
-    preloaded_threads_json = json.dumps(preloaded_threads or {"threads": {}}, ensure_ascii=False, separators=(",", ":"))
     return f"""
 (() => {{
   try {{
@@ -465,8 +202,6 @@ def build_injection_source(
   const rendererPatch = module.exports.default || module.exports;
   const api = {{
     process: "renderer",
-    threadDataUrl: {thread_data_url_json},
-    preloadedThreads: {preloaded_threads_json},
     log: {{
       debug: (...args) => console.debug("[codex-perf-fast-loader]", ...args),
       info: (...args) => console.info("[codex-perf-fast-loader]", ...args),
@@ -776,29 +511,13 @@ def run(args: argparse.Namespace) -> int:
     port = find_free_port() if args.port == 0 else args.port
     app_path = Path(args.app_path).expanduser()
     workspace = Path(args.workspace).expanduser().resolve() if args.workspace else None
-    data_server: ThreadDataHttpServer | None = None
-    thread_data_url: str | None = None
-    thread_store = ThreadDataStore(Path(args.codex_home).expanduser()) if args.inject else None
-    preloaded_threads: dict[str, Any] | None = None
-    if thread_store is not None and args.preload_threads:
-        preloaded_threads = thread_store.preloaded_recent_threads(
-            args.preload_thread_count,
-            args.preload_turn_count,
-            args.preload_text_chars,
-        )
-    if args.inject and args.thread_data_server and thread_store is not None:
-        data_server = ThreadDataHttpServer(
-            thread_store,
-            0 if args.thread_data_port == 0 else args.thread_data_port,
-        ).start()
-        thread_data_url = data_server.endpoint
     if args.launch:
         launch_codex(app_path, port, workspace)
     targets = wait_for_targets(port, args.timeout)
     target = select_codex_page_target(targets)
     client = CdpClient(target["webSocketDebuggerUrl"])
     try:
-        source = build_injection_source(Path(args.renderer_js).expanduser(), thread_data_url, preloaded_threads)
+        source = build_injection_source(Path(args.renderer_js).expanduser())
         inject_result = {}
         if args.inject:
             inject_result = inject_renderer_patch(client, source)
@@ -813,42 +532,17 @@ def run(args: argparse.Namespace) -> int:
             click_result = {"readiness": readiness, **click_result}
             time.sleep(args.wait_seconds)
             metrics = collect_renderer_metrics(client, click_result, port, args.inject, js_heap_before_bytes)
-            if data_server is not None:
-                metrics["thread_data_server"] = {
-                    "bind": "127.0.0.1",
-                    "port": data_server.port,
-                    "codex_home": str(Path(args.codex_home).expanduser()),
-                    "enabled": True,
-                }
-            if preloaded_threads is not None:
-                metrics["preloaded_threads"] = {
-                    "enabled": True,
-                    "thread_count": len(preloaded_threads.get("threads", {})) // 2,
-                    "turn_limit": preloaded_threads.get("turn_limit"),
-                    "text_limit": preloaded_threads.get("text_limit"),
-                }
             write_outputs(Path(args.output_dir).expanduser(), metrics, inject_result)
-        print(json.dumps({
-            "port": port,
-            "target": {"id": target.get("id"), "url": target.get("url"), "title": target.get("title")},
-            "injected": bool(args.inject),
-            "measured": bool(args.measure),
-            "thread_data_server": (
-                {"bind": "127.0.0.1", "port": data_server.port}
-                if data_server is not None
-                else None
-            ),
-            "preloaded_threads": (
-                {"thread_count": len(preloaded_threads.get("threads", {})) // 2}
-                if preloaded_threads is not None
-                else None
-            ),
-            "output_dir": str(Path(args.output_dir).expanduser()) if args.measure else None,
-        }, indent=2, sort_keys=True))
+        if args.measure:
+            print(json.dumps({
+                "port": port,
+                "target": {"id": target.get("id"), "url": target.get("url"), "title": target.get("title")},
+                "injected": bool(args.inject),
+                "measured": True,
+                "output_dir": str(Path(args.output_dir).expanduser()),
+            }, indent=2, sort_keys=True))
     finally:
         client.close()
-        if data_server is not None:
-            data_server.stop()
     return 0
 
 
@@ -857,23 +551,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=DEFAULT_CDP_PORT, help=f"Local CDP port, or 0 for a free port. Default: {DEFAULT_CDP_PORT}")
     parser.add_argument("--app-path", default="/Applications/Codex.app", help="Path to Codex.app")
     parser.add_argument("--workspace", default=str(Path.cwd()), help="Workspace to open with Codex Desktop")
-    parser.add_argument("--codex-home", default=str(default_codex_home()), help="Codex home used by the loopback thread-data server")
     parser.add_argument("--renderer-js", default=str(default_renderer_path()), help="Renderer JavaScript file to inject")
     parser.add_argument("--output-dir", default=str(default_output_dir()), help="Directory for CDP metrics artifacts")
     parser.add_argument("--timeout", type=float, default=30.0, help="Seconds to wait for CDP target")
     parser.add_argument("--wait-seconds", type=float, default=5.0, help="Seconds to wait after triggering navigation")
     parser.add_argument("--pre-click-timeout", type=float, default=10.0, help="Seconds to wait for a clickable thread row before measuring")
     parser.add_argument("--click-selector", help="Optional CSS selector to click for measurement")
-    parser.add_argument("--thread-data-port", type=int, default=0, help="Loopback thread-data API port, or 0 for a free port")
-    parser.add_argument("--no-thread-data-server", dest="thread_data_server", action="store_false", help="Disable the loopback thread-data API used by the lightweight view")
-    parser.add_argument("--no-preload-threads", dest="preload_threads", action="store_false", help="Do not embed recent thread pages into the renderer patch")
-    parser.add_argument("--preload-thread-count", type=int, default=20, help="Number of recent active threads to preload for lightweight rendering")
-    parser.add_argument("--preload-turn-count", type=int, default=80, help="Maximum newest turns to preload per thread")
-    parser.add_argument("--preload-text-chars", type=int, default=2000, help="Maximum characters per rendered turn in the preloaded lightweight view")
     parser.add_argument("--no-launch", dest="launch", action="store_false", help="Attach to an existing CDP-enabled Codex app")
     parser.add_argument("--no-inject", dest="inject", action="store_false", help="Measure without injecting the fast-loader script")
     parser.add_argument("--no-measure", dest="measure", action="store_false", help="Only launch and inject")
-    parser.set_defaults(launch=True, inject=True, measure=True, thread_data_server=True, preload_threads=True)
+    parser.set_defaults(launch=True, inject=True, measure=True)
     return parser
 
 
