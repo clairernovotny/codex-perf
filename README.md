@@ -7,6 +7,20 @@ Local launcher and renderer patch for making large Codex Desktop profiles usable
 titles bounded and prefetch thread data on click. The chat view remains the
 native Codex thread page.
 
+## Quick Start
+
+macOS:
+
+```bash
+./codex-perf.sh
+```
+
+Windows:
+
+```cmd
+codex-perf.cmd
+```
+
 ## TL;DR
 
 | Area | What happens |
@@ -138,26 +152,6 @@ The repo also contains a clean injected CDP measurement in
 | Long task count | `0` |
 | Total long task duration | `0 ms` |
 | Transient heap spike | `91,844,356 bytes` |
-
-## Quick Start
-
-macOS:
-
-```bash
-./codex-perf.sh
-```
-
-Windows:
-
-```cmd
-codex-perf.cmd
-```
-
-Attach to an already CDP-enabled Codex app:
-
-```bash
-python3 scripts/codex-perf-launch.py --no-launch --no-measure
-```
 
 ## How It Works
 
