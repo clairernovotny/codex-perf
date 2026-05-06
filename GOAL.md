@@ -3,7 +3,7 @@ Build a standalone Codex Desktop performance workaround from PLAN.md.
 
 The deliverables are:
 - `scripts/fix-codex-perf.py`, a cross-platform Python 3.10+ standard-library-only repair, backup, restore, and measurement tool for Codex thread metadata.
-- A packaged or generated CDP wrapper renderer patch, or equivalent standalone app-process patch, that improves large-thread loading without user clicks and without deleting chat history.
+- A standalone CDP wrapper renderer patch, or equivalent standalone app-process patch, that improves large-thread loading without user clicks and without deleting chat history.
 - A safe autonomous live-repair/self-relaunch strategy for the case where the current Codex agent cannot mutate `~/.codex` while Codex is running.
 - Before/after measurement artifacts proving title repair, reconciliation durability, restoreability, and large-thread UX improvement.
 </goal>
@@ -25,7 +25,7 @@ Key PLAN.md facts to preserve:
 Useful discovery commands:
 - `git status --short --branch`
 - `rg --files`
-- `rg "summarize_for_label|ThreadNameUpdated|session_index|state_5.sqlite|Codex\\+\\+" -n . ~/.codex 2>/dev/null`
+- `rg "summarize_for_label|ThreadNameUpdated|session_index|state_5.sqlite" -n . ~/.codex 2>/dev/null`
 - `python scripts/fix-codex-perf.py --help`
 - `python scripts/fix-codex-perf.py measure --phase all`
 - `codex --help`
@@ -46,7 +46,7 @@ Do not mutate SQLite or JSONL while Codex Desktop, Codex CLI, or Codex app-serve
 
 Do not solve the live-repair problem by weakening the process-safety rule or by requiring a human handoff. The goal must run end-to-end without questions and without asking the user to run follow-up commands.
 
-If a temporary custom `--codex-home` is used for implementation or verification, it must start as a faithful copy of the current `~/.codex`, including `state_5.sqlite`, SQLite sidecars when present, `session_index.jsonl`, rollout JSONL files, relevant config, and any CDP wrapper renderer patch/runtime files needed to reproduce current behavior. It may then be isolated and mutated for tests. Synthetic fixtures can still be added for edge-case coverage, but they cannot replace the copied-current-state verification path.
+If a temporary custom `--codex-home` is used for implementation or verification, it must start as a faithful copy of the current `~/.codex`, including `state_5.sqlite`, SQLite sidecars when present, `session_index.jsonl`, rollout JSONL files, relevant config, and any CDP wrapper renderer patch files needed to reproduce current behavior. It may then be isolated and mutated for tests. Synthetic fixtures can still be added for edge-case coverage, but they cannot replace the copied-current-state verification path.
 
 If the current agent is running inside a Codex process that must be terminated for real `~/.codex` repair, design and prove an autonomous detached runner before live mutation. The runner must record the current session/goal resume command if the installed Codex supports it, schedule the repair after the current Codex process exits, and then relaunch/resume the session automatically. If non-interactive resume is not supported, the runner must continue autonomously by writing complete logs/artifacts and launching a new Codex process or equivalent continuation path that can finish verification without user input. It must not degrade into a human-run handoff.
 
@@ -58,9 +58,9 @@ The Python title-generation function must be a literal semantic port of the Rust
 
 The CDP wrapper renderer patch must never mutate `~/.codex/state_5.sqlite`, rollout JSONL, or `session_index.jsonl`. State repair belongs only in the backup-first Python maintenance tool.
 
-The UX workaround must require no extra click to load older turns. Older history must load automatically in the background, and disabling the patch must restore stock behavior.
+The UX workaround must require no extra click to load older turns. Older history must load automatically in the background, and disabling the renderer patch must restore stock behavior.
 
-The patch must fail open on unknown Codex builds, selectors, or event shapes. Include a storage kill switch and a `stop()` cleanup path for listeners, timers, styles, and patches.
+The renderer patch must fail open on unknown Codex builds, selectors, or event shapes. Include a storage kill switch and a `stop()` cleanup path for listeners, timers, styles, and patches.
 
 Do not widen scope into general Codex cleanup, archive active chats, delete history, or implement unrelated app features.
 </constraints>
@@ -116,17 +116,17 @@ Title metrics include active row count, total active title chars, max active tit
 
 Thread-loading metrics include app-server read/list timings and payload sizes for selected large threads, CDP first-visible-content time, CDP settled-thread-shell time, long task count, total long-task duration, max long-task duration, JS heap before/after/post-GC, and a boolean or note confirming older turns loaded automatically without an extra user click.
 
-The CDP wrapper renderer patch is default-enabled after install, requires no user click to improve loading, emits performance marks for navigation start, first paint, and navigation end, coordinates with installed CDP wrapper renderer patchs to pause tab preview capture or similar expensive work during thread navigation, and does not mutate SQLite, rollout JSONL, or `session_index.jsonl`.
+The CDP wrapper injects the renderer patch by default, requires no user click to improve loading, emits performance marks for navigation start, first paint, and navigation end, coordinates through wrapper events to pause tab preview capture or similar expensive work during thread navigation, and does not mutate SQLite, rollout JSONL, or `session_index.jsonl`.
 
 The CDP wrapper renderer patch fails open on unknown Codex builds/selectors/event shapes, has a storage kill switch, removes listeners/timers/styles/patches in `stop()`, and disabling it restores stock Codex behavior.
 
-The live-repair/self-relaunch problem is explicitly resolved without user intervention: either all risky live mutation is avoided by completing the full repair, restore, metrics, patch, and reconciliation verification against a custom `--codex-home` copied from the current `~/.codex`, or a detached self-cleaning runner proves it can run repair after Codex exits and automatically resume/relaunch/continue verification using installed Codex mechanisms. The chosen path is documented in `metrics-summary.md` or a dedicated autonomous-runner summary artifact with commands, logs, backup path, resume/continuation status, and fallback behavior. No completion path may depend on the user manually running commands.
+The live-repair/self-relaunch problem is explicitly resolved without user intervention: either all risky live mutation is avoided by completing the full repair, restore, metrics, renderer patch, and reconciliation verification against a custom `--codex-home` copied from the current `~/.codex`, or a detached self-cleaning runner proves it can run repair after Codex exits and automatically resume/relaunch/continue verification using installed Codex mechanisms. The chosen path is documented in `metrics-summary.md` or a dedicated autonomous-runner summary artifact with commands, logs, backup path, resume/continuation status, and fallback behavior. No completion path may depend on the user manually running commands.
 </done_when>
 
 <workflow>
 1. Inspect the repo and current plan. Run `git status --short --branch`, list files with `rg --files`, and read `PLAN.md` before editing.
 
-2. Establish copied-current-state verification before touching live state. Create a temporary custom `--codex-home` from the current `~/.codex`, preserving SQLite, SQLite sidecars when present, `session_index.jsonl`, rollout JSONL files, relevant config, and CDP wrapper renderer patch/runtime files needed for realistic verification. Record source and copied file hashes. Add synthetic edge-case fixtures only after the copied-current-state path exists.
+2. Establish copied-current-state verification before touching live state. Create a temporary custom `--codex-home` from the current `~/.codex`, preserving SQLite, SQLite sidecars when present, `session_index.jsonl`, rollout JSONL files, relevant config, and CDP wrapper renderer patch files needed for realistic verification. Record source and copied file hashes. Add synthetic edge-case fixtures only after the copied-current-state path exists.
 
 3. Design the live-repair strategy. Inspect installed Codex resume capabilities with `codex --help` and `codex resume --help`. Decide whether live mutation will be avoided by completing the full run against the copied custom Codex home, or handled through a detached self-cleaning runner that can resume/relaunch/continue without user input. Document the autonomous path before any live `~/.codex` mutation.
 
@@ -146,7 +146,7 @@ The live-repair/self-relaunch problem is explicitly resolved without user interv
 
 11. Implement title measurement. Save before/after metrics for row counts, title lengths, payload bytes, query timing, JSON encode timing, and full list-item comparison.
 
-12. Implement or package the CDP wrapper renderer patch. Verify selectors and event/request paths against the current Codex DOM/runtime. Prefer conservative renderer containment and navigation coordination first; intercept app-server/turn paging only when the path is stable and safely reversible.
+12. Implement the CDP wrapper renderer patch. Verify selectors and event/request paths against the current Codex DOM/runtime. Prefer conservative renderer containment and navigation coordination first; intercept app-server/turn paging only when the path is stable and safely reversible.
 
 13. Implement thread-loading measurement. Use CDP or an equivalent harness to measure first visible content, settled shell, long tasks, heap, app-server timing, and automatic older-turn hydration.
 
@@ -206,11 +206,11 @@ Verify backup/restore:
 - restore returns all backed-up files to manifest hashes
 
 Verify CDP wrapper renderer patch behavior:
-- patch installs or is generated in the expected standalone location
-- it is default-enabled after install
+- renderer patch exists at the expected standalone location
+- it is injected by default
 - it emits navigation start, first-paint, and navigation-end marks
 - it pauses/coalesces noncritical work during navigation without dropping active assistant output, errors, or status
-- disabling the patch restores stock behavior
+- running the wrapper with `--no-inject` restores stock behavior
 - `stop()` removes listeners, timers, styles, and patches
 
 Verify UX metrics against selected large local threads:
@@ -248,7 +248,7 @@ If a check cannot run on the current host, state why, provide the closest fixtur
 Final artifacts must include:
 - `scripts/fix-codex-perf.py`
 - test fixtures or tests for title summarization, process detection, backup/repair/restore, idempotence, and restore hashes
-- generated or packaged CDP wrapper renderer patch files, if the patch path is feasible
+- CDP wrapper renderer patch files, if the renderer patch path is feasible
 - timestamped backup/output directories from verification runs
 - `metrics-before.json`
 - `metrics-after-title-repair.json`
