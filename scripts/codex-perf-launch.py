@@ -40,6 +40,47 @@ def default_output_dir() -> Path:
     return Path.cwd() / "artifacts" / f"codex-perf-cdp-{timestamp_slug()}"
 
 
+def windows_app_path_candidates(environ: dict[str, str] | None = None) -> list[Path]:
+    env = environ if environ is not None else os.environ
+    candidates: list[Path] = []
+    explicit = env.get("CODEX_DESKTOP_PATH")
+    if explicit:
+        candidates.append(Path(explicit))
+    local_app_data = env.get("LOCALAPPDATA")
+    if local_app_data:
+        local_root = Path(local_app_data)
+        candidates.extend([
+            local_root / "Programs" / "Codex" / "Codex.exe",
+            local_root / "Programs" / "codex" / "Codex.exe",
+            local_root / "Programs" / "OpenAI Codex" / "Codex.exe",
+            local_root / "Codex" / "Codex.exe",
+        ])
+    for key in ("ProgramFiles", "ProgramFiles(x86)"):
+        value = env.get(key)
+        if value:
+            root = Path(value)
+            candidates.extend([
+                root / "Codex" / "Codex.exe",
+                root / "OpenAI Codex" / "Codex.exe",
+            ])
+    return candidates
+
+
+def default_app_path(system: str | None = None, environ: dict[str, str] | None = None) -> str:
+    current_system = system or platform.system()
+    if current_system == "Darwin":
+        return "/Applications/Codex.app"
+    if current_system == "Windows":
+        candidates = windows_app_path_candidates(environ)
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+        if candidates:
+            return str(candidates[0])
+        return "Codex.exe"
+    return "codex"
+
+
 def find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -229,8 +270,19 @@ def build_injection_source(
 
 
 def launch_codex(app_path: Path, port: int, workspace: Path | None) -> None:
-    if platform.system() != "Darwin":
-        raise RuntimeError("Codex.app CDP launch wrapper is currently implemented for macOS")
+    current_system = platform.system()
+    if current_system == "Darwin":
+        launch_macos_codex(app_path, port)
+    elif current_system == "Windows":
+        launch_windows_codex(app_path, port)
+    else:
+        raise RuntimeError(f"Codex Desktop CDP launch is not implemented for {current_system}")
+    if workspace is not None:
+        time.sleep(1)
+        subprocess.run(["codex", "app", str(workspace)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def launch_macos_codex(app_path: Path, port: int) -> None:
     subprocess.run(
         [
             "open",
@@ -242,9 +294,22 @@ def launch_codex(app_path: Path, port: int, workspace: Path | None) -> None:
         ],
         check=True,
     )
-    if workspace is not None:
-        time.sleep(1)
-        subprocess.run(["codex", "app", str(workspace)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def launch_windows_codex(app_path: Path, port: int) -> None:
+    if not app_path.exists():
+        candidates = "\n  ".join(str(path) for path in windows_app_path_candidates())
+        hint = f" Tried:\n  {candidates}" if candidates else ""
+        raise RuntimeError(f"Codex Desktop executable not found: {app_path}.{hint}")
+    subprocess.Popen(
+        [
+            str(app_path),
+            "--remote-debugging-address=127.0.0.1",
+            f"--remote-debugging-port={port}",
+        ],
+        cwd=str(app_path.parent),
+        close_fds=True,
+    )
 
 
 def inject_renderer_patch(client: CdpClient, source: str) -> dict[str, Any]:
@@ -549,7 +614,7 @@ def run(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=DEFAULT_CDP_PORT, help=f"Local CDP port, or 0 for a free port. Default: {DEFAULT_CDP_PORT}")
-    parser.add_argument("--app-path", default="/Applications/Codex.app", help="Path to Codex.app")
+    parser.add_argument("--app-path", default=default_app_path(), help="Path to Codex Desktop app bundle or executable")
     parser.add_argument("--workspace", default=str(Path.cwd()), help="Workspace to open with Codex Desktop")
     parser.add_argument("--renderer-js", default=str(default_renderer_path()), help="Renderer JavaScript file to inject")
     parser.add_argument("--output-dir", default=str(default_output_dir()), help="Directory for CDP metrics artifacts")

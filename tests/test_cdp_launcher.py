@@ -1,6 +1,8 @@
 import importlib.util
 import sys
+import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -72,6 +74,40 @@ class CdpLauncherTests(unittest.TestCase):
         self.assertIn('"open",', code)
         self.assertIn('"-a",', code)
         self.assertNotIn('"-na",', code)
+
+    def test_windows_default_app_path_uses_local_app_data_candidates(self):
+        app_path = self.launcher.default_app_path(
+            system="Windows",
+            environ={"LOCALAPPDATA": "C:/Users/Claire/AppData/Local"},
+        )
+        self.assertEqual(app_path, "C:/Users/Claire/AppData/Local/Programs/Codex/Codex.exe")
+
+    def test_windows_launch_starts_codex_exe_with_cdp_args(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app_path = Path(tmp) / "Codex.exe"
+            app_path.write_bytes(b"")
+            with mock.patch.object(self.launcher.platform, "system", return_value="Windows"):
+                with mock.patch.object(self.launcher.subprocess, "Popen") as popen:
+                    with mock.patch.object(self.launcher.subprocess, "run") as run:
+                        self.launcher.launch_codex(app_path, 17373, None)
+
+        popen.assert_called_once_with(
+            [
+                str(app_path),
+                "--remote-debugging-address=127.0.0.1",
+                "--remote-debugging-port=17373",
+            ],
+            cwd=str(app_path.parent),
+            close_fds=True,
+        )
+        run.assert_not_called()
+
+    def test_windows_launch_reports_missing_codex_exe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app_path = Path(tmp) / "Codex.exe"
+            with mock.patch.object(self.launcher.platform, "system", return_value="Windows"):
+                with self.assertRaisesRegex(RuntimeError, "Codex Desktop executable not found"):
+                    self.launcher.launch_codex(app_path, 17373, None)
 
     def test_root_launchers_do_not_run_offline_repair_before_launch(self):
         shell_code = SHELL_LAUNCHER.read_text(encoding="utf-8")
