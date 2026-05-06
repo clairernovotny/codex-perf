@@ -31,7 +31,9 @@ python3 scripts/codex-perf-launch.py --no-launch --no-measure
 
 The launch scripts delegate directly to `scripts/codex-perf-launch.py`. They do
 not print status, run the offline repair command, or check for or kill other
-Codex processes before launch.
+Codex processes before launch. On macOS, the launcher uses `open -a` so it does
+not intentionally force a fresh `Codex.app` instance when one is already
+running.
 
 ## Current Architecture
 
@@ -118,6 +120,19 @@ Useful options:
 | `--no-measure` | Launch and inject without collecting metrics |
 | `--no-inject` | Stop an existing patch and measure baseline behavior |
 
+For repeated measurement runs, start one CDP-enabled Codex app and attach to it:
+
+```bash
+python3 scripts/codex-perf-launch.py --no-launch --output-dir artifacts/perf-injected
+python3 scripts/codex-perf-launch.py --no-launch --no-inject --output-dir artifacts/perf-baseline
+```
+
+The built-in injected timing fields are based on renderer patch events. A
+`--no-inject` baseline does not emit those patch events, so
+`cdp_first_visible_content_ms` and `cdp_settled_thread_shell_ms` can be `null`
+there. Treat native-vs-injected thread switching as unproven unless the run
+captures a real clicked thread row and a real rendered chat view.
+
 ### Offline Metadata Tool
 
 `scripts/fix-codex-perf.py` remains available for explicit backup, restore, and
@@ -157,6 +172,7 @@ safety path only belongs to explicit offline repair/restore commands.
 | Symptom | What to do |
 | --- | --- |
 | `CDP target list unavailable` | Relaunch through `./codex-perf.sh`, or attach with `--no-launch` only after starting Codex with the same CDP port |
+| Measurement opens extra Codex windows | Use a single CDP-enabled app and rerun measurements with `--no-launch` |
 | Patch should be disabled | Set localStorage key `codex-perf-fast-thread-loader:disabled` to `1` |
 | Background prefetch fails | Native Codex navigation still proceeds; rerun with a current Codex build if you need prefetch metrics |
 | Offline repair prompts about running Codex processes | Stop Codex yourself, or explicitly allow the offline tool to terminate matching processes |
