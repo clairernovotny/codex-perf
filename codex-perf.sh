@@ -9,5 +9,5 @@ else
   PYTHON=python
 fi
 
-nohup "$PYTHON" "$ROOT_DIR/scripts/codex-perf-launch.py" --no-measure "$@" >/dev/null 2>&1 &
+nohup "$PYTHON" "$ROOT_DIR/scripts/codex-perf-launch.py" "$@" >/dev/null 2>&1 &
 exit 0

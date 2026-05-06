@@ -244,15 +244,15 @@ python3 scripts/codex-perf-launch.py --help
 | `--workspace <path>` | Workspace to open. |
 | `--renderer-js <path>` | Renderer JavaScript file to inject. |
 | `--no-launch` | Attach to an existing CDP-enabled app. |
-| `--no-measure` | Launch and inject with metrics collection skipped. |
+| `--measure` | Collect CDP metrics artifacts after launch/injection. |
 | `--no-inject` | Stop an existing patch and measure baseline behavior. |
 | `--output-dir <path>` | Directory for CDP measurement artifacts. |
 
 Repeated measurement runs should attach to one CDP-enabled app:
 
 ```bash
-python3 scripts/codex-perf-launch.py --no-launch --output-dir artifacts/perf-injected
-python3 scripts/codex-perf-launch.py --no-launch --no-inject --output-dir artifacts/perf-baseline
+python3 scripts/codex-perf-launch.py --no-launch --measure --output-dir artifacts/perf-injected
+python3 scripts/codex-perf-launch.py --no-launch --no-inject --measure --output-dir artifacts/perf-baseline
 ```
 
 For useful thread-switching numbers, capture a clicked thread row, a rendered

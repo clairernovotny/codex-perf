@@ -713,8 +713,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--click-selector", help="Optional CSS selector to click for measurement")
     parser.add_argument("--no-launch", dest="launch", action="store_false", help="Attach to an existing CDP-enabled Codex app")
     parser.add_argument("--no-inject", dest="inject", action="store_false", help="Measure without injecting the fast-loader script")
-    parser.add_argument("--no-measure", dest="measure", action="store_false", help="Only launch and inject")
-    parser.set_defaults(launch=True, inject=True, measure=True)
+    parser.add_argument("--measure", dest="measure", action="store_true", help="Collect CDP metrics artifacts after launch/injection")
+    parser.add_argument("--no-measure", dest="measure", action="store_false", help=argparse.SUPPRESS)
+    parser.set_defaults(launch=True, inject=True, measure=False)
     return parser
 
 
