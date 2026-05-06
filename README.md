@@ -1,59 +1,61 @@
 # codex-perf
 
-Local launcher and renderer patch for keeping a large Codex Desktop profile responsive.
+Local launcher and renderer patch for making large Codex Desktop profiles usable.
 
 `codex-perf` starts Codex Desktop with a Chrome DevTools Protocol port, injects
-`renderer/fast-thread-loader.js`, and uses Codex's app-action API for ongoing
-title repair and background thread prefetch. Thread navigation and chat
-rendering stay on the native Codex thread page.
+`renderer/fast-thread-loader.js`, and uses Codex's app-action API to keep thread
+titles bounded and prefetch thread data on click. The chat view remains the
+native Codex thread page.
 
-## The Performance Issue
+## TL;DR
 
-Codex Desktop keeps thread metadata in local storage and sends that metadata
-into an Electron renderer to build the sidebar and route into thread views. Large
-local profiles can develop thread titles that are full prompt previews instead
-of short labels.
+| Area | What happens |
+| --- | --- |
+| Problem | Oversized thread metadata and eager large-history hydration make Electron thread switching feel stuck. |
+| Runtime fix | Inject a renderer patch over CDP, repair titles with `threads.set_title`, and prefetch with `threads.read`. |
+| macOS launch | `./codex-perf.sh` opens `/Applications/Codex.app` with CDP on `127.0.0.1:17373`. |
+| Windows launch | `codex-perf.cmd` finds Codex Desktop in common install locations, including MSIX `WindowsApps` packages. |
+| Evidence | The issue data shows title-list payload dropping from `15.6 MB` to `25 KB`, and JSON encode median from `46.34 ms` to `0.14 ms`. |
 
-Those long titles create UI lag in the Electron renderer:
+## Why This Exists
 
-- The app process has to read and JSON-encode much larger thread-list rows.
-- Electron has to move that larger payload across the app-to-renderer boundary.
-- The renderer has to parse, allocate, diff, and reconcile large strings on the
-  JavaScript main thread.
-- Sidebar rows with huge text force more text handling, truncation, and layout
-  work during list updates.
+Codex Desktop keeps thread metadata locally and sends it into an Electron
+renderer to build the sidebar and open thread views. In affected profiles,
+`threads.title` can become a full prompt-sized preview instead of a short label.
 
-The visible symptom is a sidebar or thread switch that appears stuck. The UI
-thread is busy processing metadata that should have been a short label.
+That matters because the UI path pays for the oversized title repeatedly:
 
-Changing into an old or large thread also has a cold path: Codex starts native
-navigation first, then reads enough thread data to show the chat. When that read
-starts only after the route transition, thread switching feels stuck even though
-the app is still working.
+- SQLite reads larger thread-list rows.
+- The app process JSON-encodes much larger payloads.
+- Electron moves the payload into the renderer.
+- The renderer parses, allocates, diffs, reconciles, truncates, and lays out huge
+  strings on the JavaScript main thread.
 
-`codex-perf` addresses those two hot spots at runtime:
+Large threads add a second hot path: opening a thread can eagerly hydrate and
+render too much history before the view becomes usable.
 
-- Keep thread titles bounded by calling Codex's `threads.set_title` app action.
-- Start a lightweight `threads.read` prefetch as soon as a thread row is clicked.
+`codex-perf` targets both paths at runtime:
 
-## Observed Perf Data
+- Bound display titles through Codex's `threads.set_title` app action.
+- Start a lightweight `threads.read(limit=10, includeOutputs=false)` prefetch as
+  soon as a thread row is clicked.
 
-The baseline data is from
+## Evidence
+
+The baseline data below comes from
 [openai/codex#21211](https://github.com/openai/codex/issues/21211), which
-isolated the title-length issue by benchmarking the same affected SQLite row set
-before and after shortening only pathological active titles.
+isolated title length by benchmarking the same SQLite row set before and after
+shortening only pathological active titles.
 
 ### Title Metadata
 
-| DB snapshot | Active rows | Active title chars | Active first_user_message chars | Max title chars | Active titles > 120 |
+| DB snapshot | Active rows | Active title chars | Active first_user_message chars | Max title chars | Titles > 120 |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Bad backup | `134` | `14,610,549` | `14,614,033` | `675,773` | `94` |
 | Same rows after title repair | `134` | `3,588` | `14,614,033` | `120` | `0` |
 | Current repaired DB | `158` | `5,154` | `14,614,486` | `120` | `0` |
 
 ### Thread-List Query
-
-This query approximates the active thread navigation/list path that needs titles:
 
 ```sql
 SELECT id, title, source, cwd, updated_at_ms
@@ -65,23 +67,26 @@ LIMIT 200;
 
 Measured over 80 iterations:
 
-| DB snapshot | Rows | Result payload bytes | SQLite query median | SQLite query p95 | JSON encode median |
+| DB snapshot | Rows | Result payload | SQLite median | SQLite p95 | JSON encode median |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Bad backup | `134` | `15,605,594` | `8.12 ms` | `10.30 ms` | `46.34 ms` |
-| Same rows after title repair | `134` | `25,074` | `0.15 ms` | `0.19 ms` | `0.14 ms` |
-| Current repaired DB | `158` | `34,343` | `0.17 ms` | `0.19 ms` | `0.17 ms` |
+| Bad backup | `134` | `15,605,594 bytes` | `8.12 ms` | `10.30 ms` | `46.34 ms` |
+| Same rows after title repair | `134` | `25,074 bytes` | `0.15 ms` | `0.19 ms` | `0.14 ms` |
+| Current repaired DB | `158` | `34,343 bytes` | `0.17 ms` | `0.19 ms` | `0.17 ms` |
 
-The same rows went from `15.6 MB` to `25 KB`, about `622x` smaller. SQLite read
-median went from `8.12 ms` to `0.15 ms`, about `54x` faster. JSON encode median
-went from `46.34 ms` to `0.14 ms`, about `331x` faster.
+Impact on the same rows:
 
-Electron pays after these numbers: the payload still has to cross the app-to-
-renderer boundary, then the renderer parses, allocates, reconciles, and lays out
-sidebar rows on the JavaScript main thread.
+| Metric | Change |
+| --- | ---: |
+| Result payload | `15.6 MB` -> `25 KB`, about `622x` smaller |
+| SQLite read median | `8.12 ms` -> `0.15 ms`, about `54x` faster |
+| JSON encode median | `46.34 ms` -> `0.14 ms`, about `331x` faster |
+
+Those numbers are before Electron IPC and before renderer-side parse,
+allocation, reconciliation, and layout work.
 
 ### Full List Item With Preview
 
-When the list path includes both `title` and `first_user_message`, the bad title
+When the list item includes both `title` and `first_user_message`, a bad title
 duplicates the full prompt-sized preview:
 
 ```sql
@@ -92,16 +97,16 @@ ORDER BY updated_at_ms DESC, id DESC
 LIMIT 200;
 ```
 
-| DB snapshot | Rows | Result payload bytes | SQLite query median | SQLite query p95 | JSON encode median |
+| DB snapshot | Rows | Result payload | SQLite median | SQLite p95 | JSON encode median |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Bad backup | `134` | `31,196,414` | `14.70 ms` | `17.75 ms` | `90.73 ms` |
-| Same rows after title repair | `134` | `15,615,894` | `7.12 ms` | `8.55 ms` | `46.22 ms` |
-| Current repaired DB | `158` | `15,626,192` | `7.08 ms` | `8.50 ms` | `45.40 ms` |
+| Bad backup | `134` | `31,196,414 bytes` | `14.70 ms` | `17.75 ms` | `90.73 ms` |
+| Same rows after title repair | `134` | `15,615,894 bytes` | `7.12 ms` | `8.55 ms` | `46.22 ms` |
+| Current repaired DB | `158` | `15,626,192 bytes` | `7.08 ms` | `8.50 ms` | `45.40 ms` |
 
-### Thread List And Thread Read
+### Thread Read Hydration
 
-Direct app-server probes showed list payload size and large-thread hydration as
-separate hot paths:
+Direct app-server probes show thread-list payload size and large-thread
+hydration as separate hot paths:
 
 | Operation | Timing | Response size |
 | --- | ---: | ---: |
@@ -123,8 +128,8 @@ CDP profiling inside Codex Desktop tied those payloads to visible Electron lag:
 | Renderer heap spike during switch | `>200 MB` transient |
 | Repeated renderer long tasks | about `1.8-2.0 s` each |
 
-Thread-click measurements in this repo are stored under `artifacts/`. The clean
-injected CDP run in `artifacts/codex-perf-cdp-20260506-021020/` recorded:
+The repo also contains a clean injected CDP measurement in
+`artifacts/codex-perf-cdp-20260506-021020/`:
 
 | Metric | Value |
 | --- | ---: |
@@ -154,12 +159,7 @@ Attach to an already CDP-enabled Codex app:
 python3 scripts/codex-perf-launch.py --no-launch --no-measure
 ```
 
-The root launch scripts delegate directly to `scripts/codex-perf-launch.py`.
-macOS uses `open -a` so an existing `Codex.app` instance can receive the launch
-request. Windows starts the Codex Desktop `.exe` directly with the same CDP
-arguments.
-
-## Current Architecture
+## How It Works
 
 ```text
 codex-perf.sh / codex-perf.cmd
@@ -183,7 +183,29 @@ Codex app-action API
 normal Codex storage and native rendering
 ```
 
-## Platform Launch
+The renderer runs a guarded periodic title fixer:
+
+| Setting | Value |
+| --- | ---: |
+| Scan interval | `30 s` |
+| Title ceiling | `120 chars` |
+| Per-thread cooldown | `60 s` |
+| App action | `threads.set_title` |
+
+Thread row clicks keep the native Codex route transition and start a background
+prefetch:
+
+```text
+click thread row
+        |
+        | native Codex click continues
+        |
+        | threads.read(limit=10, includeOutputs=false)
+        v
+native Codex thread page renders
+```
+
+## Platform Details
 
 Default app path resolution:
 
@@ -206,7 +228,7 @@ Windows candidates include:
 %ProgramFiles(x86)%\OpenAI Codex\Codex.exe
 ```
 
-Use an explicit executable or `app` directory path when needed:
+Use an explicit executable or MSIX `app` directory path when needed:
 
 ```cmd
 codex-perf.cmd --app-path "C:\path\to\Codex.exe"
@@ -215,83 +237,42 @@ codex-perf.cmd --app-path "C:\Program Files\WindowsApps\OpenAI.Codex_26.429.8261
 
 `CODEX_DESKTOP_PATH` is also honored when set.
 
-## Title Repair
-
-Codex can rewrite thread titles from rollout-derived metadata. The injected
-runtime repairs those titles through Codex's own app-action API.
-
-The renderer runs a guarded periodic fixer:
-
-- Every `30s`, call `threads.list`.
-- Detect titles longer than `120` characters and titles that match a long
-  preview fallback.
-- Compute a bounded title from the thread preview.
-- Call `threads.set_title` when the bounded title differs.
-- Apply a `60s` per-thread cooldown.
-
-## Thread Prefetch
-
-Thread row clicks keep the native Codex route transition. The renderer patch
-starts a background prefetch beside that native transition:
-
-```text
-click thread row
-        |
-        | native Codex click continues
-        |
-        | threads.read(limit=10, includeOutputs=false) runs in background
-        v
-native Codex thread page renders
-```
-
-## Commands
-
-### Launch Wrapper
+## Command Reference
 
 ```bash
 python3 scripts/codex-perf-launch.py --help
 ```
 
-Useful options:
-
 | Option | Purpose |
 | --- | --- |
-| `--port 17373` | CDP port. Use `0` to pick a free port |
-| `--app-path <path>` | Codex Desktop app bundle or executable path |
-| `--workspace <path>` | Workspace to open |
-| `--renderer-js <path>` | Renderer JavaScript file to inject |
-| `--no-launch` | Attach to an existing CDP-enabled app |
-| `--no-measure` | Launch and inject with metrics collection skipped |
-| `--no-inject` | Stop an existing patch and measure baseline behavior |
+| `--port 17373` | CDP port. Use `0` to pick a free port. |
+| `--app-path <path>` | Codex Desktop app bundle, executable, or MSIX `app` directory. |
+| `--workspace <path>` | Workspace to open. |
+| `--renderer-js <path>` | Renderer JavaScript file to inject. |
+| `--no-launch` | Attach to an existing CDP-enabled app. |
+| `--no-measure` | Launch and inject with metrics collection skipped. |
+| `--no-inject` | Stop an existing patch and measure baseline behavior. |
+| `--output-dir <path>` | Directory for CDP measurement artifacts. |
 
-For repeated measurement runs, start one CDP-enabled Codex app and attach to it:
+Repeated measurement runs should attach to one CDP-enabled app:
 
 ```bash
 python3 scripts/codex-perf-launch.py --no-launch --output-dir artifacts/perf-injected
 python3 scripts/codex-perf-launch.py --no-launch --no-inject --output-dir artifacts/perf-baseline
 ```
 
-For reliable thread-switching numbers, capture a clicked thread row, a rendered
+For useful thread-switching numbers, capture a clicked thread row, a rendered
 chat view, long-task data, heap data, and the output artifact path from the same
 CDP-enabled app instance.
-
-## Safety Model
-
-- The normal launch path edits titles through Codex app actions.
-- Periodic title repair uses actual title/preview checks and a per-thread cooldown.
-- Thread clicks use native Codex navigation with a background `threads.read` prefetch.
-- The renderer patch has a localStorage kill switch:
-  `codex-perf-fast-thread-loader:disabled=1`.
-- The renderer patch cleans up listeners, timers, styles, and bridge patches through `stop()`.
 
 ## Troubleshooting
 
 | Symptom | Action |
 | --- | --- |
-| `CDP target list unavailable` | Relaunch through the platform wrapper, or attach with `--no-launch` after starting Codex with the same CDP port |
-| Windows custom install path | Pass `--app-path "C:\path\to\Codex.exe"` or set `CODEX_DESKTOP_PATH` |
-| Repeated measurements | Start one CDP-enabled app and rerun measurements with `--no-launch` |
-| Patch kill switch is enabled | Clear localStorage key `codex-perf-fast-thread-loader:disabled` |
+| `CDP target list unavailable` | Relaunch through the platform wrapper, or attach with `--no-launch` after starting Codex with the same CDP port. |
+| Windows custom install path | Pass `--app-path "C:\path\to\Codex.exe"` or set `CODEX_DESKTOP_PATH`. |
+| Repeated measurements | Start one CDP-enabled app and rerun measurements with `--no-launch`. |
+| Patch kill switch is enabled | Clear localStorage key `codex-perf-fast-thread-loader:disabled`. |
 
 ## Development
 
@@ -304,7 +285,7 @@ python3 -m unittest discover -s tests -v
 Check syntax:
 
 ```bash
-python3 -m py_compile scripts/codex-perf-launch.py
+python3 -m py_compile scripts/fix-codex-perf.py scripts/codex-perf-launch.py
 node --check renderer/fast-thread-loader.js
 sh -n codex-perf.sh
 ```
