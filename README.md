@@ -38,35 +38,93 @@ the app is still working.
 
 ## Observed Perf Data
 
-The title problem is large enough to dominate thread-list work. A local
-measurement pass on May 6, 2026 used 2,408 active thread rows and compared the
-same title-list query before and after bounding oversized titles to 120
-characters.
+The baseline data is from
+[openai/codex#21211](https://github.com/openai/codex/issues/21211), which
+isolated the title-length issue by benchmarking the same affected SQLite row set
+before and after shortening only pathological active titles.
 
-| Metric | Before bounded titles | After bounded titles |
+### Title Metadata
+
+| DB snapshot | Active rows | Active title chars | Active first_user_message chars | Max title chars | Active titles > 120 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Bad backup | `134` | `14,610,549` | `14,614,033` | `675,773` | `94` |
+| Same rows after title repair | `134` | `3,588` | `14,614,033` | `120` | `0` |
+| Current repaired DB | `158` | `5,154` | `14,614,486` | `120` | `0` |
+
+### Thread-List Query
+
+This query approximates the active thread navigation/list path that needs titles:
+
+```sql
+SELECT id, title, source, cwd, updated_at_ms
+FROM threads
+WHERE COALESCE(archived,0)=0
+ORDER BY updated_at_ms DESC, id DESC
+LIMIT 200;
+```
+
+Measured over 80 iterations:
+
+| DB snapshot | Rows | Result payload bytes | SQLite query median | SQLite query p95 | JSON encode median |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Bad backup | `134` | `15,605,594` | `8.12 ms` | `10.30 ms` | `46.34 ms` |
+| Same rows after title repair | `134` | `25,074` | `0.15 ms` | `0.19 ms` | `0.14 ms` |
+| Current repaired DB | `158` | `34,343` | `0.17 ms` | `0.19 ms` | `0.17 ms` |
+
+The same rows went from `15.6 MB` to `25 KB`, about `622x` smaller. SQLite read
+median went from `8.12 ms` to `0.15 ms`, about `54x` faster. JSON encode median
+went from `46.34 ms` to `0.14 ms`, about `331x` faster.
+
+Electron pays after these numbers: the payload still has to cross the app-to-
+renderer boundary, then the renderer parses, allocates, reconciles, and lays out
+sidebar rows on the JavaScript main thread.
+
+### Full List Item With Preview
+
+When the list path includes both `title` and `first_user_message`, the bad title
+duplicates the full prompt-sized preview:
+
+```sql
+SELECT id, title, first_user_message, source, cwd, updated_at_ms
+FROM threads
+WHERE COALESCE(archived,0)=0
+ORDER BY updated_at_ms DESC, id DESC
+LIMIT 200;
+```
+
+| DB snapshot | Rows | Result payload bytes | SQLite query median | SQLite query p95 | JSON encode median |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Bad backup | `134` | `31,196,414` | `14.70 ms` | `17.75 ms` | `90.73 ms` |
+| Same rows after title repair | `134` | `15,615,894` | `7.12 ms` | `8.55 ms` | `46.22 ms` |
+| Current repaired DB | `158` | `15,626,192` | `7.08 ms` | `8.50 ms` | `45.40 ms` |
+
+### Thread List And Thread Read
+
+Direct app-server probes showed list payload size and large-thread hydration as
+separate hot paths:
+
+| Operation | Timing | Response size |
 | --- | ---: | ---: |
-| Active titles over 120 chars | `93` | `0` |
-| Total active title characters | `17,962,096` | `137,194` |
-| Max active title length | `941,848` | `120` |
-| Title-list payload | `18,970,749 bytes` | `45,676 bytes` |
-| Title-list SQLite query median | `6.020 ms` | `0.180 ms` |
-| Title-list SQLite query p95 | `6.751 ms` | `0.552 ms` |
-| Title-list JSON encode median | `75.058 ms` | `0.162 ms` |
-| Title-list JSON encode p95 | `79.421 ms` | `0.303 ms` |
+| `thread/list archived=false useStateDbOnly=true limit=20` | `2.56 s` | `4,505,704 bytes` |
+| `thread/list archived=false useStateDbOnly=true limit=100` | `7.95 s` | `14,628,806 bytes` |
+| `thread/list archived=false useStateDbOnly=false limit=100` | `8.26 s` | `14,627,363 bytes` |
+| `thread/read includeTurns=false`, 48.7 MB image-heavy rollout | `62.8 ms` | `850 bytes` |
+| `thread/read includeTurns=true`, 48.7 MB image-heavy rollout | `11.65 s` | `20,654,619 bytes` |
+| `thread/read includeTurns=false`, 45.9 MB compaction-heavy rollout | `27.8 ms` | `875 bytes` |
+| `thread/read includeTurns=true`, 45.9 MB compaction-heavy rollout | `3.39 s` | `6,363,354 bytes` |
+| `thread/read includeTurns=false`, 1.4 MB giant first-message rollout | `415.9 ms` | `704,374 bytes` |
+| `thread/read includeTurns=true`, 1.4 MB giant first-message rollout | `814.0 ms` | `1,414,448 bytes` |
 
-That is a `99.8%` payload reduction for the title-list response and moves JSON
-encoding from tens of milliseconds to sub-millisecond. The extreme case was one
-thread title carrying `941,848` characters where the UI needed a short label.
-In Electron terms, that removes about `18.9 MB` of avoidable string payload from
-the thread-list path before the renderer starts parsing, allocating, reconciling,
-and laying out sidebar rows.
+CDP profiling inside Codex Desktop tied those payloads to visible Electron lag:
 
-The runtime fixer uses the same 120-character ceiling. A later drift check found
-one new title at `137` characters; the same app-action repair path brought the
-max active title length back to `120`.
+| UI observation | Value |
+| --- | ---: |
+| Tested thread switch settle time | about `13.4 s` |
+| Renderer heap spike during switch | `>200 MB` transient |
+| Repeated renderer long tasks | about `1.8-2.0 s` each |
 
-Thread-click measurements are stored under `artifacts/`. The clean injected CDP
-run in `artifacts/codex-perf-cdp-20260506-021020/` recorded:
+Thread-click measurements in this repo are stored under `artifacts/`. The clean
+injected CDP run in `artifacts/codex-perf-cdp-20260506-021020/` recorded:
 
 | Metric | Value |
 | --- | ---: |
