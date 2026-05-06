@@ -64,6 +64,8 @@ def windows_app_path_candidates(environ: dict[str, str] | None = None) -> list[P
                 root / "OpenAI Codex" / "Codex.exe",
             ])
             candidates.extend(windows_store_app_path_candidates(root))
+    if env.get("SystemRoot"):
+        candidates.extend(windows_appx_package_path_candidates(env))
     return candidates
 
 
@@ -91,6 +93,50 @@ def windows_store_app_path_candidates(program_files: Path) -> list[Path]:
     return candidates
 
 
+def windows_appx_package_path_candidates(environ: dict[str, str]) -> list[Path]:
+    powershell = (
+        Path(environ["SystemRoot"]) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        if environ.get("SystemRoot")
+        else Path("powershell")
+    )
+    command = (
+        "Get-AppxPackage -Name OpenAI.Codex | "
+        "Sort-Object {[version]$_.Version} -Descending | "
+        "ForEach-Object { $_.InstallLocation }"
+    )
+    try:
+        result = subprocess.run(
+            [
+                str(powershell),
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                command,
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    candidates: list[Path] = []
+    for line in result.stdout.splitlines():
+        install_location = line.strip()
+        if not install_location:
+            continue
+        root = Path(install_location)
+        candidates.extend([
+            root / "app" / "Codex.exe",
+            root / "app" / "codex.exe",
+            root / "Codex.exe",
+        ])
+    return candidates
+
+
 def default_app_path(system: str | None = None, environ: dict[str, str] | None = None) -> str:
     current_system = system or platform.system()
     if current_system == "Darwin":
@@ -108,8 +154,12 @@ def default_app_path(system: str | None = None, environ: dict[str, str] | None =
 
 def resolve_windows_app_executable(app_path: Path) -> Path:
     if app_path.is_dir():
-        for name in ("Codex.exe", "codex.exe"):
-            candidate = app_path / name
+        for candidate in (
+            app_path / "Codex.exe",
+            app_path / "codex.exe",
+            app_path / "app" / "Codex.exe",
+            app_path / "app" / "codex.exe",
+        ):
             if candidate.exists():
                 return candidate
     return app_path

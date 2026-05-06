@@ -3,7 +3,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -80,7 +80,10 @@ class CdpLauncherTests(unittest.TestCase):
             system="Windows",
             environ={"LOCALAPPDATA": "C:/Users/Claire/AppData/Local"},
         )
-        self.assertEqual(app_path, "C:/Users/Claire/AppData/Local/Programs/Codex/Codex.exe")
+        self.assertEqual(
+            PureWindowsPath(app_path),
+            PureWindowsPath("C:/Users/Claire/AppData/Local/Programs/Codex/Codex.exe"),
+        )
 
     def test_windows_default_app_path_finds_windowsapps_msix_install(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -94,6 +97,30 @@ class CdpLauncherTests(unittest.TestCase):
                 system="Windows",
                 environ={"ProgramFiles": str(root)},
             )
+
+        self.assertEqual(app_path, str(exe))
+
+    def test_windows_default_app_path_uses_appx_package_install_location(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            program_files = Path(tmp) / "Program Files"
+            package_root = Path(tmp) / "Appx" / "OpenAI.Codex_26.429.8261.0_x64__2p2nqsd0c76g0"
+            app_dir = package_root / "app"
+            app_dir.mkdir(parents=True)
+            exe = app_dir / "Codex.exe"
+            exe.write_bytes(b"")
+            completed = self.launcher.subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=f"{package_root}\n",
+            )
+            with mock.patch.object(self.launcher.subprocess, "run", return_value=completed):
+                app_path = self.launcher.default_app_path(
+                    system="Windows",
+                    environ={
+                        "ProgramFiles": str(program_files),
+                        "SystemRoot": "C:/Windows",
+                    },
+                )
 
         self.assertEqual(app_path, str(exe))
 
@@ -126,6 +153,27 @@ class CdpLauncherTests(unittest.TestCase):
             with mock.patch.object(self.launcher.platform, "system", return_value="Windows"):
                 with mock.patch.object(self.launcher.subprocess, "Popen") as popen:
                     self.launcher.launch_codex(app_dir, 17373, None)
+
+        popen.assert_called_once_with(
+            [
+                str(exe),
+                "--remote-debugging-address=127.0.0.1",
+                "--remote-debugging-port=17373",
+            ],
+            cwd=str(app_dir),
+            close_fds=True,
+        )
+
+    def test_windows_launch_accepts_msix_package_root_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            package_root = Path(tmp) / "WindowsApps" / "OpenAI.Codex_26.429.8261.0_x64__2p2nqsd0c76g0"
+            app_dir = package_root / "app"
+            app_dir.mkdir(parents=True)
+            exe = app_dir / "Codex.exe"
+            exe.write_bytes(b"")
+            with mock.patch.object(self.launcher.platform, "system", return_value="Windows"):
+                with mock.patch.object(self.launcher.subprocess, "Popen") as popen:
+                    self.launcher.launch_codex(package_root, 17373, None)
 
         popen.assert_called_once_with(
             [
