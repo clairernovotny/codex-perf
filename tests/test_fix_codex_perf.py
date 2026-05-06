@@ -280,6 +280,60 @@ class BackupRepairRestoreTests(unittest.TestCase):
             self.assertTrue(str(row.rollout_path.resolve()).startswith(str(home.resolve())))
             self.assertTrue(row.rollout_path.exists())
 
+    def test_status_reports_needed_and_exit_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            home, _ = make_home(tmp_path)
+            status = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--codex-home",
+                    str(home),
+                    "status",
+                    "--exit-code",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(status.returncode, 2)
+            self.assertIn("Repair needed: yes", status.stdout)
+            self.assertIn("Affected active threads: 1", status.stdout)
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--codex-home",
+                    str(home),
+                    "repair",
+                    "--backup-dir",
+                    str(tmp_path / "backups"),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            clean = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--codex-home",
+                    str(home),
+                    "status",
+                    "--exit-code",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(clean.returncode, 0)
+            self.assertIn("Repair needed: no", clean.stdout)
+
     def test_repair_yes_records_killed_matching_processes_in_manifest(self):
         tool = load_tool()
         with tempfile.TemporaryDirectory() as tmp:
@@ -319,6 +373,25 @@ class BackupRepairRestoreTests(unittest.TestCase):
                 manifest["killed_codex_processes"],
                 [{"pid": 4321, "name": "codex", "command": "/tmp/bin/codex app-server"}],
             )
+
+    def test_stop_yes_uses_process_safety(self):
+        tool = load_tool()
+        with tempfile.TemporaryDirectory() as tmp:
+            home, _ = make_home(Path(tmp))
+            killed = [tool.ProcessInfo(pid=4321, name="codex", command="/tmp/bin/codex app-server")]
+            original_default_home = tool.default_codex_home
+            original_detect = tool.detect_codex_processes
+            original_kill = tool.kill_processes
+            try:
+                tool.default_codex_home = lambda: home
+                tool.detect_codex_processes = lambda: killed
+                tool.kill_processes = lambda processes: processes
+                args = type("Args", (), {"codex_home": str(home), "yes": True})()
+                self.assertEqual(tool.command_stop(args), 0)
+            finally:
+                tool.default_codex_home = original_default_home
+                tool.detect_codex_processes = original_detect
+                tool.kill_processes = original_kill
 
 
 if __name__ == "__main__":

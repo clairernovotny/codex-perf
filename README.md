@@ -56,8 +56,18 @@ python3 scripts/fix-codex-perf.py \
 Launch Codex through the wrapper:
 
 ```bash
-python3 scripts/codex-perf-launch.py
+./codex-perf.sh
 ```
+
+On Windows:
+
+```cmd
+codex-perf.cmd
+```
+
+The root launch script stops existing Codex processes, checks title metadata,
+creates a backup and repairs when needed, then launches Codex through the
+wrapper with measurement disabled.
 
 Attach to an already CDP-enabled Codex process:
 
@@ -118,6 +128,8 @@ python3 scripts/fix-codex-perf.py --help
 | Command | Purpose |
 | --- | --- |
 | `backup` | Create a timestamped read-only backup package |
+| `status` | Check whether title repair is needed |
+| `stop` | Stop running Codex processes |
 | `repair` | Back up, repair title metadata, append reconciliation events, and write metrics |
 | `restore --backup <path>` | Restore files from a selected backup manifest and validate hashes |
 | `measure --phase title` | Write title/query/list measurement artifacts |
@@ -127,6 +139,8 @@ python3 scripts/fix-codex-perf.py --help
 Examples:
 
 ```bash
+python3 scripts/fix-codex-perf.py status
+python3 scripts/fix-codex-perf.py stop -y
 python3 scripts/fix-codex-perf.py repair
 python3 scripts/fix-codex-perf.py restore --backup ~/.codex/backups/thread-perf-fix-YYYYMMDD-HHMMSS -y
 python3 scripts/fix-codex-perf.py measure --phase all

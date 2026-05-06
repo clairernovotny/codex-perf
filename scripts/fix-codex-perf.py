@@ -892,6 +892,35 @@ def command_backup(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_status(args: argparse.Namespace) -> int:
+    codex_home = resolve_codex_home(args.codex_home)
+    rows = inventory(codex_home)
+    if not args.quiet:
+        print(f"Repair needed: {'yes' if rows else 'no'}")
+        print(f"Affected active threads: {len(rows)}")
+        if rows:
+            print(f"Max affected title length: {max(len(row.title) for row in rows)}")
+            print(f"Max affected first-user-message length: {max(len(row.first_user_message) for row in rows)}")
+            print("Examples:")
+            for row in rows[: max(args.limit, 0)]:
+                print(
+                    f"  {row.id}\t"
+                    f"title_len={len(row.title)}\t"
+                    f"first_user_message_len={len(row.first_user_message)}\t"
+                    f"cwd={row.cwd}"
+                )
+    if args.exit_code and rows:
+        return 2
+    return 0
+
+
+def command_stop(args: argparse.Namespace) -> int:
+    codex_home = resolve_codex_home(args.codex_home)
+    killed = preflight_process_safety(codex_home, args.yes)
+    print(f"Stopped Codex processes: {len(killed)}")
+    return 0
+
+
 def command_repair(args: argparse.Namespace) -> int:
     codex_home = resolve_codex_home(args.codex_home)
     killed = preflight_process_safety(codex_home, args.yes)
@@ -1076,6 +1105,16 @@ def build_parser() -> argparse.ArgumentParser:
     backup = sub.add_parser("backup", help="Create a timestamped non-mutating backup package")
     backup.add_argument("--backup-dir", help="Directory that will contain timestamped backup packages")
     backup.set_defaults(func=command_backup)
+
+    status = sub.add_parser("status", help="Check whether title metadata repair is needed")
+    status.add_argument("--limit", type=int, default=5, help="Maximum affected thread examples to print")
+    status.add_argument("--quiet", action="store_true", help="Suppress status output")
+    status.add_argument("--exit-code", action="store_true", help="Return exit code 2 when repair is needed")
+    status.set_defaults(func=command_status)
+
+    stop = sub.add_parser("stop", help="Stop running Codex processes")
+    stop.add_argument("-y", "--yes", action="store_true", help="Kill matching live Codex processes without prompting")
+    stop.set_defaults(func=command_stop)
 
     repair = sub.add_parser("repair", help="Backup, repair title metadata, and write metrics")
     repair.add_argument("--backup-dir", help="Directory that will contain timestamped backup packages")
