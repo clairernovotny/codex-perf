@@ -50,7 +50,10 @@ render too much history before the view becomes usable.
 
 `codex-perf` targets both paths at runtime:
 
-- Bound display titles through Codex's `threads.set_title` app action.
+- Bound display titles through Codex's `threads.set_title` app action. The
+  title fixer handles oversized titles, blank/default titles, and generic
+  dispatch labels such as orchestrator prompts or plan/export handoff prompts by
+  deriving a short label from the task text.
 - Start a lightweight `threads.read(limit=10, includeOutputs=false)` prefetch as
   soon as a thread row is clicked.
 

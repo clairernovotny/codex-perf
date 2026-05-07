@@ -107,6 +107,22 @@ class RendererPatchTests(unittest.TestCase):
         ]:
             self.assertIn(required, code)
 
+    def test_title_repair_handles_orchestrator_and_dispatch_prompts(self):
+        code = PATCH.read_text(encoding="utf-8")
+        for required in [
+            "isLowQualityTitleSource",
+            "promptDerivedTitle",
+            "Raw request:",
+            "Your job is",
+            "Your job:",
+            "Task:",
+            "read the live plan at",
+            "read the revised plan at",
+            "read the oracle export at",
+            "titleIsLowQuality",
+        ]:
+            self.assertIn(required, code)
+
 
 if __name__ == "__main__":
     unittest.main()

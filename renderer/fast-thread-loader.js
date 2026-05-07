@@ -303,17 +303,60 @@ function createRuntime() {
     return text.length > TITLE_MAX_LEN ? `${text.slice(0, Math.max(TITLE_MAX_LEN - 3, 0))}...` : text;
   }
 
+  function firstSentence(text) {
+    const value = String(text == null ? "" : text).trim();
+    const match = value.match(/^(.{24,}?[.!?])(?:\s|$)/);
+    return match ? match[1].replace(/[.!?]+$/, "") : value;
+  }
+
+  function cleanTitleCandidate(text) {
+    let value = String(text == null ? "" : text)
+      .replace(/<file_map>[\s\S]*$/i, " ")
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/\s+/g, " ")
+      .trim();
+    value = value
+      .replace(/^[-*#>\s]+/, "")
+      .replace(/^items?\s+[\w.-]+(?:\s*[-\u2013]\s*[\w.-]+)?\s+(?:are\s+)?(?:complete|done)\.?\s*/i, "")
+      .replace(/^steps?\s+[\w.-]+(?:\s*[-\u2013]\s*[\w.-]+)?\s*(?:\/\s*[^:]+)?\s*(?:only)?\s*:\s*/i, "")
+      .replace(/^items?\s+[\w.-]+(?:\s*[-\u2013]\s*[\w.-]+)?\s*(?:only)?\s*:\s*/i, "")
+      .replace(/^agent\s+[a-z0-9-]+\s*(?:only)?\s*:\s*/i, "")
+      .replace(/^the\s+new\s+follow-up\s+requirement\s+only:\s*/i, "")
+      .replace(/^fix\s+the\s+review\s+findings\s+from\s+the\s+oracle\s+review\s+for\s+the\s+/i, "Fix ")
+      .replace(/^fix\s+the\s+blocking\s+review\s+findings\s+for\s+the\s+/i, "Fix ")
+      .trim();
+    value = firstSentence(value);
+    if (/^[a-z][a-z]/.test(value) && !value.startsWith("macOS")) {
+      value = `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
+    }
+    return truncateTitle(value);
+  }
+
   function summarizeTitle(text) {
     let firstLine = String(text == null ? "" : text).split("\n", 1)[0];
     if (firstLine.endsWith("\r")) {
       firstLine = firstLine.slice(0, -1);
     }
-    return truncateTitle(firstLine.trim());
+    return cleanTitleCandidate(firstLine);
   }
 
   function isPlaceholderTitle(text) {
     const value = String(text == null ? "" : text).trim().toLowerCase();
     return value === "" || value === "new chat";
+  }
+
+  function isLowQualityTitleSource(text) {
+    const value = String(text == null ? "" : text).trim().toLowerCase();
+    return value === "# orchestrator" ||
+      value === "orchestrator" ||
+      value.startsWith("# orchestrator\n") ||
+      value.startsWith("read the live plan at ") ||
+      value.startsWith("read the revised plan at ") ||
+      value.startsWith("read the plan at ") ||
+      value.startsWith("read the oracle export at ") ||
+      value.startsWith("read prompt-exports/") ||
+      (value.startsWith("read `prompt-exports/") && value.includes("` first"));
   }
 
   function isBoilerplateTitleSource(text) {
@@ -324,6 +367,33 @@ function createRuntime() {
       value.startsWith("<permissions instructions>") ||
       value.startsWith("<codex reminder>") ||
       value.startsWith("/last30days:");
+  }
+
+  function matchPromptTitle(text, expression) {
+    const match = String(text == null ? "" : text).match(expression);
+    return match ? cleanTitleCandidate(match[1] || match[0]) : "";
+  }
+
+  function promptDerivedTitle(text) {
+    const value = String(text == null ? "" : text);
+    const candidates = [
+      matchPromptTitle(value, /(?:^|\n)\s*Raw request:\s*([\s\S]*?)(?:\n\s*\n|$)/i),
+      matchPromptTitle(value, /\bYour job is\s+([\s\S]*?)(?:\n\s*\n|$)/i),
+      matchPromptTitle(value, /\bYour job:\s*([\s\S]*?)(?:\n\s*\n|$)/i),
+      matchPromptTitle(value, /(?:^|\n)\s*Task:\s*([\s\S]*?)(?:\n\s*\n|$)/i),
+    ];
+    for (const candidate of candidates) {
+      if (candidate && !isBoilerplateTitleSource(candidate) && !isLowQualityTitleSource(candidate)) {
+        return candidate;
+      }
+    }
+    for (const line of value.split(/\r?\n/)) {
+      const candidate = cleanTitleCandidate(line);
+      if (candidate && !isBoilerplateTitleSource(candidate) && !isLowQualityTitleSource(candidate)) {
+        return candidate;
+      }
+    }
+    return "";
   }
 
   function parseJsonObject(value) {
@@ -367,8 +437,8 @@ function createRuntime() {
 
   function firstMeaningfulTitleSource(...values) {
     for (const value of values) {
-      const title = summarizeTitle(value);
-      if (title && !isBoilerplateTitleSource(title)) {
+      const title = promptDerivedTitle(value) || summarizeTitle(value);
+      if (title && !isBoilerplateTitleSource(title) && !isLowQualityTitleSource(title)) {
         return title;
       }
     }
@@ -386,14 +456,15 @@ function createRuntime() {
     const source = firstMeaningfulTitleSource(metadataTitle, preview, firstUserMessage);
     const fallbackSource = source || (currentTitle.length > TITLE_MAX_LEN ? currentTitle : "");
     const repairedTitle = summarizeTitle(source);
-    const fallbackRepairedTitle = repairedTitle || summarizeTitle(fallbackSource);
-    if (!thread.id || !fallbackRepairedTitle || currentTitle === fallbackRepairedTitle) {
+    const fallbackRepairedTitle = repairedTitle || promptDerivedTitle(fallbackSource) || summarizeTitle(fallbackSource);
+    if (!thread.id || !fallbackRepairedTitle || isLowQualityTitleSource(fallbackRepairedTitle) || currentTitle === fallbackRepairedTitle) {
       return null;
     }
     const titleIsLong = currentTitle.length > TITLE_MAX_LEN;
     const titleIsPreviewFallback = preview.length > TITLE_MAX_LEN && currentTitle === preview;
     const titleIsPlaceholder = isPlaceholderTitle(currentTitle);
-    return titleIsLong || titleIsPreviewFallback || titleIsPlaceholder
+    const titleIsLowQuality = isLowQualityTitleSource(currentTitle);
+    return titleIsLong || titleIsPreviewFallback || titleIsPlaceholder || titleIsLowQuality
       ? { threadId: thread.id, title: fallbackRepairedTitle }
       : null;
   }
