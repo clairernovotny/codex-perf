@@ -311,20 +311,91 @@ function createRuntime() {
     return truncateTitle(firstLine.trim());
   }
 
+  function isPlaceholderTitle(text) {
+    const value = String(text == null ? "" : text).trim().toLowerCase();
+    return value === "" || value === "new chat";
+  }
+
+  function isBoilerplateTitleSource(text) {
+    const value = String(text == null ? "" : text).trim().toLowerCase();
+    return !value ||
+      value === "new chat" ||
+      value.startsWith("# agents.md instructions") ||
+      value.startsWith("<permissions instructions>") ||
+      value.startsWith("<codex reminder>") ||
+      value.startsWith("/last30days:");
+  }
+
+  function parseJsonObject(value) {
+    if (!value || typeof value !== "string") {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function titleCaseWords(value) {
+    return String(value || "")
+      .split(/[\s_-]+/)
+      .filter(Boolean)
+      .map((word) => word.length ? `${word.slice(0, 1).toUpperCase()}${word.slice(1)}` : "")
+      .join(" ");
+  }
+
+  function titleFromAgentPath(agentPath) {
+    const parts = String(agentPath || "").split("/").filter(Boolean);
+    const leaf = parts[parts.length - 1] || "";
+    return titleCaseWords(leaf);
+  }
+
+  function metadataTitleSource(thread) {
+    const source = typeof thread.source === "object" && thread.source
+      ? thread.source
+      : parseJsonObject(thread.source);
+    const spawn = source?.subagent?.thread_spawn || source?.thread_spawn || null;
+    const agentPath = thread.agent_path || thread.agentPath || spawn?.agent_path;
+    const fromPath = titleFromAgentPath(agentPath);
+    if (fromPath) {
+      return fromPath;
+    }
+    return thread.agent_nickname || thread.agentNickname || spawn?.agent_nickname || "";
+  }
+
+  function firstMeaningfulTitleSource(...values) {
+    for (const value of values) {
+      const title = summarizeTitle(value);
+      if (title && !isBoilerplateTitleSource(title)) {
+        return title;
+      }
+    }
+    return "";
+  }
+
   function repairTitleForThreadSummary(thread) {
     if (!thread || typeof thread !== "object") {
       return null;
     }
     const currentTitle = String(thread.title || "").trim();
     const preview = String(thread.preview || "").trim();
-    const source = preview || currentTitle;
+    const firstUserMessage = thread.first_user_message || thread.firstUserMessage || "";
+    const metadataTitle = metadataTitleSource(thread);
+    const source = firstMeaningfulTitleSource(metadataTitle, preview, firstUserMessage);
+    const fallbackSource = source || (currentTitle.length > TITLE_MAX_LEN ? currentTitle : "");
     const repairedTitle = summarizeTitle(source);
-    if (!thread.id || !repairedTitle || currentTitle === repairedTitle) {
+    const fallbackRepairedTitle = repairedTitle || summarizeTitle(fallbackSource);
+    if (!thread.id || !fallbackRepairedTitle || currentTitle === fallbackRepairedTitle) {
       return null;
     }
     const titleIsLong = currentTitle.length > TITLE_MAX_LEN;
     const titleIsPreviewFallback = preview.length > TITLE_MAX_LEN && currentTitle === preview;
-    return titleIsLong || titleIsPreviewFallback ? { threadId: thread.id, title: repairedTitle } : null;
+    const titleIsPlaceholder = isPlaceholderTitle(currentTitle);
+    return titleIsLong || titleIsPreviewFallback || titleIsPlaceholder
+      ? { threadId: thread.id, title: fallbackRepairedTitle }
+      : null;
   }
 
   async function repairTitleFromThreadSummary(thread) {

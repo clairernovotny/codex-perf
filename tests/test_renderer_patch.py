@@ -88,6 +88,25 @@ class RendererPatchTests(unittest.TestCase):
         ]:
             self.assertIn(required, code)
 
+    def test_title_repair_handles_placeholder_titles_from_metadata(self):
+        code = PATCH.read_text(encoding="utf-8")
+        for required in [
+            "isPlaceholderTitle",
+            "new chat",
+            "metadataTitleSource",
+            "titleFromAgentPath",
+            "thread.source",
+            "thread.agent_path",
+            "thread.agentPath",
+            "agent_path",
+            "isBoilerplateTitleSource",
+            "# agents.md instructions",
+            "<permissions instructions>",
+            "<codex reminder>",
+            "/last30days:",
+        ]:
+            self.assertIn(required, code)
+
 
 if __name__ == "__main__":
     unittest.main()
